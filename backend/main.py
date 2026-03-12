@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from dotenv import load_dotenv
 
 from agent.graph import AutocompleteGraphEngine
 from backend.autocomplete_engine import AutocompleteEngine
@@ -24,6 +25,8 @@ from backend.schema_manager import SchemaManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = ROOT_DIR / "db" / "demo.db"

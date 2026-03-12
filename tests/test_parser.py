@@ -24,3 +24,11 @@ def test_extract_alias_map_from_partial_sql():
     alias_map = extract_alias_map(sql)
 
     assert alias_map["u"] == "users"
+
+
+def test_extract_alias_map_does_not_treat_where_as_alias():
+    sql = "SELECT * FROM orders WHERE "
+    alias_map = extract_alias_map(sql)
+
+    assert alias_map["orders"] == "orders"
+    assert "WHERE" not in alias_map

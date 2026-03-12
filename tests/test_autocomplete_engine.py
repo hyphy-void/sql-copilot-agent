@@ -36,3 +36,12 @@ def test_suggest_keywords(tmp_path: Path):
 
     result = engine.suggest_rules(sql, len(sql))
     assert "SELECT" in result.suggestions
+
+
+def test_where_with_trailing_space_prefers_columns(tmp_path: Path):
+    engine = make_engine(tmp_path)
+    sql = "SELECT * FROM orders WHERE "
+
+    result = engine.suggest_rules(sql, len(sql))
+    assert "orders.id" in result.suggestions
+    assert "orders.order_date" in result.suggestions

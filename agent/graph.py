@@ -170,8 +170,27 @@ class AutocompleteGraphEngine:
         rule_suggestions = state.get("rule_suggestions", [])
         llm_suggestions = state.get("llm_suggestions", [])
         max_suggestions = state.get("max_suggestions", 10)
+        llm_first = bool(state.get("use_llm", True) and llm_suggestions)
 
-        merged = merge_suggestions(rule_suggestions, llm_suggestions, max_suggestions)
+        if llm_first:
+            merged = merge_suggestions(llm_suggestions, rule_suggestions, max_suggestions)
+            source_order = [("llm", llm_suggestions), ("rule", rule_suggestions)]
+        else:
+            merged = merge_suggestions(rule_suggestions, llm_suggestions, max_suggestions)
+            source_order = [("rule", rule_suggestions), ("llm", llm_suggestions)]
+
+        source_by_key: Dict[str, str] = {}
+
+        for source, source_suggestions in source_order:
+            for suggestion in source_suggestions:
+                key = _normalize_suggestion_key(suggestion)
+                if key and key not in source_by_key:
+                    source_by_key[key] = source
+
+        suggestion_sources: Dict[str, str] = {}
+        for suggestion in merged:
+            key = _normalize_suggestion_key(suggestion)
+            suggestion_sources[suggestion] = source_by_key.get(key, "rule")
 
         timings = dict(state.get("timings", {}))
         timings["rank_ms"] = round((perf_counter() - start) * 1000, 3)
@@ -182,6 +201,9 @@ class AutocompleteGraphEngine:
             "context": state.get("context", {}).get("context_type", "unknown"),
             "table": state.get("table"),
             "alias_map": state.get("alias_map", {}),
+            "rule_suggestions": rule_suggestions,
+            "llm_suggestions": llm_suggestions,
+            "suggestion_sources": suggestion_sources,
             "timings_ms": timings,
             "errors": state.get("errors", []),
         }
@@ -192,3 +214,7 @@ class AutocompleteGraphEngine:
             "debug": debug,
             "timings": timings,
         }
+
+
+def _normalize_suggestion_key(value: str) -> str:
+    return value.strip().lower()

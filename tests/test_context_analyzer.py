@@ -24,3 +24,11 @@ def test_detect_where_context():
 
     assert context.context_type == "where"
     assert context.token_prefix == "ord"
+
+
+def test_detect_where_context_after_space_has_empty_prefix():
+    sql = "SELECT * FROM orders WHERE "
+    context = detect_context(sql, len(sql))
+
+    assert context.context_type == "where"
+    assert context.token_prefix == ""

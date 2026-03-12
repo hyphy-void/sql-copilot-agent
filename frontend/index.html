@@ -147,6 +147,78 @@
         font-size: 13px;
       }
 
+      #suggestions li.suggestion-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        cursor: pointer;
+        transition: border-color 0.15s ease, transform 0.15s ease;
+      }
+
+      #suggestions li.suggestion-item:hover {
+        border-color: #b8a893;
+        transform: translateY(-1px);
+      }
+
+      #suggestions li.suggestion-item.top {
+        border-color: rgba(15, 118, 110, 0.45);
+        background: #f4fdfc;
+      }
+
+      .suggestion-text {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .suggestion-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex: 1;
+      }
+
+      .source-badge {
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+        border-radius: 999px;
+        padding: 2px 7px;
+        border: 1px solid transparent;
+        white-space: nowrap;
+      }
+
+      .source-badge.rule {
+        color: #095a53;
+        background: #dff7f2;
+        border-color: #b2e8dd;
+      }
+
+      .source-badge.llm {
+        color: #7b4601;
+        background: #fff2de;
+        border-color: #f1d2a4;
+      }
+
+      .shortcut-key {
+        color: #6e655d;
+        font-size: 11px;
+        border: 1px solid #d9ccc0;
+        border-radius: 999px;
+        padding: 2px 8px;
+        background: #fff8ef;
+        white-space: nowrap;
+      }
+
+      .shortcut-hint {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
       @media (max-width: 900px) {
         .layout {
           grid-template-columns: 1fr;
@@ -184,6 +256,7 @@
 
         <div>
           <h3>Top Suggestions</h3>
+          <p class="shortcut-hint">Rule 先返回，LLM 后补充；Tab 接受幽灵补全，Alt+1..9 选择建议</p>
           <ul id="suggestions"></ul>
         </div>
       </aside>

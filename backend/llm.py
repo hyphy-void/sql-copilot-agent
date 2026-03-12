@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
@@ -23,12 +24,30 @@ class BaseLLMProvider(ABC):
 
 
 class OpenAIProvider(BaseLLMProvider):
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         if OpenAI is None:
             raise RuntimeError("openai package is not available")
 
-        self.client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        resolved_api_key = api_key or _first_env(
+            "OPENAI_API_KEY",
+            "OPENAI_COMPATIBLE_API_KEY",
+        )
+        resolved_base_url = base_url or _first_env(
+            "OPENAI_BASE_URL",
+            "BASE_URL",
+        )
+
+        client_kwargs = {"api_key": resolved_api_key}
+        if resolved_base_url:
+            client_kwargs["base_url"] = resolved_base_url
+
+        self.client = OpenAI(**client_kwargs)
+        self.model = model or _first_env("OPENAI_MODEL", "MODEL_ID") or "gpt-4o-mini"
 
     def generate_completion(
         self, sql_prefix: str, schema_snapshot: Dict[str, List[str]], context: str
@@ -77,19 +96,23 @@ class QwenProvider(BaseLLMProvider):
 
 
 def build_llm_provider() -> Optional[BaseLLMProvider]:
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    provider_raw = _first_env("LLM_PROVIDER", "API_PROVIDER") or "openai"
+    provider = _normalize_provider(provider_raw)
 
     if provider == "qwen":
         logger.warning("LLM_PROVIDER=qwen is not implemented yet. Falling back to rule mode.")
         return None
 
-    if provider != "openai":
-        logger.warning("Unknown LLM_PROVIDER=%s. Falling back to rule mode.", provider)
+    if provider not in {"openai", "openai_compatible"}:
+        logger.warning("Unknown provider=%s. Falling back to rule mode.", provider_raw)
         return None
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _first_env("OPENAI_API_KEY", "OPENAI_COMPATIBLE_API_KEY")
     if not api_key:
-        logger.info("OPENAI_API_KEY missing. LLM suggestions disabled.")
+        logger.info(
+            "API key missing (OPENAI_API_KEY or OPENAI_COMPATIBLE_API_KEY). "
+            "LLM suggestions disabled."
+        )
         return None
 
     try:
@@ -97,6 +120,24 @@ def build_llm_provider() -> Optional[BaseLLMProvider]:
     except Exception as exc:  # pragma: no cover - network/dependency runtime behavior
         logger.warning("Failed to initialize OpenAI provider: %s", exc)
         return None
+
+
+def _first_env(*keys: str) -> Optional[str]:
+    for key in keys:
+        value = os.getenv(key)
+        if value is None:
+            continue
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _normalize_provider(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
+    if normalized in {"openai_compatible", "openai_compat"}:
+        return "openai_compatible"
+    return normalized
 
 
 def _parse_suggestions(raw_output: str) -> List[str]:

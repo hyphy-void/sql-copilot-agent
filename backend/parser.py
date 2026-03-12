@@ -12,6 +12,27 @@ _ALIAS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_SQL_KEYWORDS = {
+    "select",
+    "from",
+    "where",
+    "join",
+    "left",
+    "right",
+    "inner",
+    "outer",
+    "on",
+    "group",
+    "order",
+    "having",
+    "limit",
+    "union",
+    "as",
+    "and",
+    "or",
+    "by",
+}
+
 
 def parse_sql(sql: str) -> Optional[exp.Expression]:
     """Parse SQL into AST. Return None on parse failure."""
@@ -42,8 +63,11 @@ def extract_alias_map(sql: str) -> Dict[str, str]:
         table_name = match.group(1)
         alias_name = match.group(2)
 
+        if _is_sql_keyword(table_name):
+            continue
+
         alias_map.setdefault(table_name, table_name)
-        if alias_name:
+        if alias_name and not _is_sql_keyword(alias_name):
             alias_map[alias_name] = table_name
 
     return alias_map
@@ -54,3 +78,7 @@ def resolve_table(reference: str, alias_map: Dict[str, str]) -> Optional[str]:
     if not reference:
         return None
     return alias_map.get(reference)
+
+
+def _is_sql_keyword(token: str) -> bool:
+    return token.lower() in _SQL_KEYWORDS

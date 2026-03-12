@@ -60,6 +60,7 @@ def detect_context(sql: str, cursor: int) -> QueryContext:
     """Best-effort context inference around cursor position."""
     clamped_cursor = max(0, min(cursor, len(sql)))
     prefix = sql[:clamped_cursor]
+    ends_with_whitespace = bool(prefix) and prefix[-1].isspace()
     stripped = prefix.rstrip()
 
     qualifier = None
@@ -70,7 +71,10 @@ def detect_context(sql: str, cursor: int) -> QueryContext:
         qualifier = qualified_match.group(1)
         member_prefix = qualified_match.group(2) or ""
 
-    token_prefix = member_prefix if qualifier else _extract_token_prefix(stripped)
+    if ends_with_whitespace:
+        token_prefix = ""
+    else:
+        token_prefix = member_prefix if qualifier else _extract_token_prefix(stripped)
 
     if _FROM_TAIL_PATTERN.search(stripped):
         return QueryContext(

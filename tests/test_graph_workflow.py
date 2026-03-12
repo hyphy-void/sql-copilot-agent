@@ -27,11 +27,16 @@ def test_graph_returns_hybrid_mode_with_llm(tmp_path: Path):
     graph = make_components(tmp_path, FakeLLMProvider())
 
     sql = "SELECT * FROM orders WHERE "
-    result = graph.run(sql=sql, cursor=len(sql), use_llm=True)
+    result = graph.run(sql=sql, cursor=len(sql), use_llm=True, max_suggestions=100)
 
     assert result["mode"] == "hybrid"
+    assert result["suggestions"][0] in {
+        "order_date >= date('now', '-7 day')",
+        "price > 100",
+    }
     assert any("order_date" in item for item in result["suggestions"])
     assert "timings_ms" in result["debug"]
+    assert result["debug"]["suggestion_sources"]["order_date >= date('now', '-7 day')"] == "llm"
 
 
 def test_graph_degrades_to_rule_mode_without_llm(tmp_path: Path):
