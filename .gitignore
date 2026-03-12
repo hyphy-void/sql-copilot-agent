@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+.conda/
+
+# Local runtime data
+db/*.db
+
+# OS / editor
+.DS_Store
