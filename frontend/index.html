@@ -32,11 +32,11 @@
       }
 
       .layout {
-        max-width: 1200px;
-        margin: 0 auto;
+        width: min(1680px, calc(100vw - 48px));
+        margin: 0;
         padding: 24px;
         display: grid;
-        grid-template-columns: 2fr 1fr;
+        grid-template-columns: minmax(0, 11fr) minmax(0, 9fr);
         gap: 16px;
       }
 
@@ -134,7 +134,7 @@
         list-style: none;
         display: grid;
         gap: 8px;
-        max-height: 360px;
+        max-height: min(56vh, 520px);
         overflow: auto;
       }
 
@@ -149,7 +149,7 @@
 
       #suggestions li.suggestion-item {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: space-between;
         gap: 12px;
         cursor: pointer;
@@ -168,14 +168,22 @@
 
       .suggestion-text {
         flex: 1;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
-        white-space: nowrap;
+        white-space: normal;
+        line-height: 1.35;
+        max-height: 2.7em;
+        word-break: break-word;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
       }
 
       .suggestion-left {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 8px;
         min-width: 0;
         flex: 1;
@@ -211,6 +219,7 @@
         padding: 2px 8px;
         background: #fff8ef;
         white-space: nowrap;
+        margin-top: 1px;
       }
 
       .shortcut-hint {
@@ -221,6 +230,8 @@
 
       @media (max-width: 900px) {
         .layout {
+          width: 100%;
+          padding: 16px;
           grid-template-columns: 1fr;
         }
 

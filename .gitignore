@@ -10,6 +10,6 @@ __pycache__/
 # Local runtime data
 db/*.db
 .env
-
+refer/
 # OS / editor
 .DS_Store
