@@ -77,7 +77,7 @@ cp .env.example .env
 API_PROVIDER=OpenAI Compatible
 BASE_URL=https://coding.dashscope.aliyuncs.com/v1
 OPENAI_COMPATIBLE_API_KEY=sk-sp-****REDACTED****
-MODEL_ID=qwen3.5-plus
+MODEL_ID=qwen3-coder-next
 
 DB_PATH=./db/demo.db
 INIT_SQL_PATH=./db/init.sql
