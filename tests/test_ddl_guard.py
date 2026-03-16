@@ -29,3 +29,13 @@ def test_block_alter_rename():
     )
     assert result["allowed"] is False
     assert result["operation_type"] == "blocked_keyword"
+
+
+def test_block_schema_qualified_table_on_sqlite():
+    result = validate_ddl_statement(
+        statement="CREATE TABLE crm.users (id INTEGER PRIMARY KEY)",
+        dialect="sqlite",
+        supports_create_database=False,
+    )
+    assert result["allowed"] is False
+    assert result["operation_type"] == "qualified_table_name"

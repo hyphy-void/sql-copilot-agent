@@ -325,6 +325,15 @@
         gap: 6px;
       }
 
+      #proposal-notes {
+        margin: 0;
+        padding-left: 18px;
+        font-size: 12px;
+        color: var(--muted);
+        display: none;
+        gap: 4px;
+      }
+
       .risk-badge {
         border-radius: 999px;
         padding: 2px 8px;
@@ -419,6 +428,7 @@
           <div id="proposal-box">
             <div id="proposal-meta">No proposal yet.</div>
             <span id="proposal-risk" class="risk-badge safe">SAFE</span>
+            <ul id="proposal-notes"></ul>
             <ol id="proposal-ops"></ol>
             <div class="proposal-buttons">
               <button id="proposal-approve">Approve & Execute</button>
@@ -429,6 +439,6 @@
       </aside>
     </div>
 
-    <script src="/monaco.js?v=20260316-1"></script>
+    <script src="/monaco.js?v=20260316-2"></script>
   </body>
 </html>

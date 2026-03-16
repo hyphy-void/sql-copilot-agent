@@ -82,10 +82,11 @@ function renderProposal(proposal) {
 
   const meta = document.getElementById("proposal-meta");
   const risk = document.getElementById("proposal-risk");
+  const notesEl = document.getElementById("proposal-notes");
   const ops = document.getElementById("proposal-ops");
   const approveBtn = document.getElementById("proposal-approve");
   const rejectBtn = document.getElementById("proposal-reject");
-  if (!meta || !risk || !ops || !approveBtn || !rejectBtn) {
+  if (!meta || !risk || !notesEl || !ops || !approveBtn || !rejectBtn) {
     return;
   }
 
@@ -93,6 +94,8 @@ function renderProposal(proposal) {
     meta.textContent = "No proposal yet.";
     risk.textContent = "SAFE";
     risk.className = "risk-badge safe";
+    notesEl.innerHTML = "";
+    notesEl.style.display = "none";
     ops.innerHTML = "";
     approveBtn.disabled = true;
     rejectBtn.disabled = true;
@@ -103,6 +106,15 @@ function renderProposal(proposal) {
   meta.textContent = `#${proposal.proposal_id} | ${proposal.status} | ${proposal.backend.toUpperCase()} (${proposal.source})`;
   risk.textContent = blocking ? "BLOCKED" : "SAFE";
   risk.className = `risk-badge ${blocking ? "blocked" : "safe"}`;
+
+  notesEl.innerHTML = "";
+  const notes = proposal.notes || [];
+  notesEl.style.display = notes.length > 0 ? "grid" : "none";
+  notes.forEach((note) => {
+    const item = document.createElement("li");
+    item.textContent = note;
+    notesEl.appendChild(item);
+  });
 
   ops.innerHTML = "";
   (proposal.operations || []).forEach((operation) => {

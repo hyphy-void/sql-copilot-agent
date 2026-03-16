@@ -69,6 +69,13 @@ def validate_ddl_statement(
             reason=f"SQL parse failed: {exc}",
         )
 
+    if not supports_create_database and _has_qualified_table_reference(expression):
+        return _blocked_operation(
+            statement=normalized_sql,
+            operation_type="qualified_table_name",
+            reason="Current backend does not support schema-qualified table names.",
+        )
+
     if isinstance(expression, exp.Create):
         return _validate_create(
             statement=normalized_sql,
@@ -160,3 +167,11 @@ def _blocked_operation(statement: str, operation_type: str, reason: str) -> Dict
         "risk_level": "blocked",
         "reason": reason,
     }
+
+
+def _has_qualified_table_reference(expression: exp.Expression) -> bool:
+    table = expression.find(exp.Table)
+    if table is None:
+        return False
+
+    return table.args.get("db") is not None or table.args.get("catalog") is not None

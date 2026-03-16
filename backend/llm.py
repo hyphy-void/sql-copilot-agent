@@ -98,6 +98,12 @@ class OpenAIProvider(BaseLLMProvider):
         schema_lines = [
             f"{table}({', '.join(columns)})" for table, columns in schema_snapshot.items()
         ]
+        capability_hint = ""
+        if dialect == "sqlite":
+            capability_hint = (
+                " For SQLite, do not emit CREATE DATABASE or CREATE SCHEMA, "
+                "and do not use schema-qualified table names like crm.users."
+            )
 
         messages = [
             {
@@ -106,6 +112,7 @@ class OpenAIProvider(BaseLLMProvider):
                     "You are a SQL schema migration assistant. "
                     "Generate 1-5 SQL DDL statements only. "
                     "Output JSON array of SQL strings. Do not include markdown."
+                    f"{capability_hint}"
                 ),
             },
             {

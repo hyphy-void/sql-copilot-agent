@@ -4,6 +4,7 @@ import re
 from typing import Dict, List
 
 import sqlglot
+from sqlglot import exp
 
 from backend.llm import BaseLLMProvider
 
@@ -49,7 +50,12 @@ class DDLPlanner:
                     schema_snapshot=schema_snapshot,
                     dialect=dialect,
                 )
-                llm_statements = _filter_ddl_candidates(candidates, dialect=dialect)
+                llm_statements = _filter_ddl_candidates(
+                    candidates,
+                    backend=backend,
+                    dialect=dialect,
+                    notes=notes,
+                )
             except Exception:
                 llm_statements = []
 
@@ -97,18 +103,25 @@ def _build_template_statements(prompt: str, backend: str, dialect: str) -> tuple
     database_name = _extract_database_name(prompt)
     table_names = _extract_table_names(prompt)
     add_column_requests = _extract_add_column_requests(prompt)
+    requested_columns = _extract_column_names(prompt)
 
     if backend == "mysql" and database_name:
         statements.append(f"CREATE DATABASE IF NOT EXISTS `{database_name}`")
     elif backend == "sqlite" and database_name:
-        notes.append("SQLite backend ignores CREATE DATABASE and will use current DB file.")
+        _append_note_once(notes, "SQLite backend ignores CREATE DATABASE and will use current DB file.")
 
     if table_names:
         for table_name in table_names:
             qualified_table = table_name
             if backend == "mysql" and database_name:
                 qualified_table = f"`{database_name}`.`{table_name}`"
-            statements.append(_build_create_table_sql(qualified_table, dialect=dialect))
+            statements.append(
+                _build_create_table_sql(
+                    qualified_table,
+                    dialect=dialect,
+                    column_names=requested_columns,
+                )
+            )
 
     if add_column_requests:
         for table_name, column_name in add_column_requests:
@@ -177,23 +190,82 @@ def _extract_add_column_requests(prompt: str) -> List[tuple[str, str]]:
     return requests
 
 
-def _build_create_table_sql(table_name: str, dialect: str) -> str:
-    if dialect == "mysql":
-        return (
-            f"CREATE TABLE IF NOT EXISTS {table_name} ("
-            "id BIGINT PRIMARY KEY AUTO_INCREMENT, "
-            "name VARCHAR(255) NOT NULL, "
-            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-    return (
-        f"CREATE TABLE IF NOT EXISTS {table_name} ("
-        "id INTEGER PRIMARY KEY, "
-        "name TEXT NOT NULL, "
-        "created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-    )
+def _extract_column_names(prompt: str) -> List[str]:
+    patterns = [
+        re.compile(r"(?:字段|列)\s*(?:有|为|包括|包含|:|：)\s*([^。；;\n]+)", re.IGNORECASE),
+        re.compile(
+            r"(?:with\s+)?columns?\s*(?:are|is|as|include|includes|:)?\s*([^.;\n]+)",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for pattern in patterns:
+        match = pattern.search(prompt)
+        if not match:
+            continue
+
+        names = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", match.group(1))
+        unique_names: List[str] = []
+        seen = set()
+        for name in names:
+            lowered = name.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            unique_names.append(name)
+        if unique_names:
+            return unique_names
+
+    return []
 
 
-def _filter_ddl_candidates(candidates: List[str], dialect: str) -> List[str]:
+def _build_create_table_sql(
+    table_name: str,
+    dialect: str,
+    column_names: List[str] | None = None,
+) -> str:
+    columns = _build_column_definitions(column_names or [], dialect=dialect)
+    return f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(columns)})"
+
+
+def _build_column_definitions(column_names: List[str], dialect: str) -> List[str]:
+    if not column_names:
+        if dialect == "mysql":
+            return [
+                "id BIGINT PRIMARY KEY AUTO_INCREMENT",
+                "name VARCHAR(255) NOT NULL",
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            ]
+        return [
+            "id INTEGER PRIMARY KEY",
+            "name TEXT NOT NULL",
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP",
+        ]
+
+    return [_build_column_definition(name, dialect=dialect) for name in column_names]
+
+
+def _build_column_definition(column_name: str, dialect: str) -> str:
+    normalized = column_name.lower()
+
+    if normalized == "id":
+        return "id BIGINT PRIMARY KEY AUTO_INCREMENT" if dialect == "mysql" else "id INTEGER PRIMARY KEY"
+
+    if normalized in {"created_at", "updated_at"}:
+        if dialect == "mysql":
+            return f"{column_name} TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        return f"{column_name} TEXT DEFAULT CURRENT_TIMESTAMP"
+
+    base_type = "VARCHAR(255)" if dialect == "mysql" else "TEXT"
+    return f"{column_name} {base_type}"
+
+
+def _filter_ddl_candidates(
+    candidates: List[str],
+    backend: str,
+    dialect: str,
+    notes: List[str],
+) -> List[str]:
     filtered: List[str] = []
     for candidate in candidates:
         sql = (candidate or "").strip().strip("`")
@@ -205,13 +277,49 @@ def _filter_ddl_candidates(candidates: List[str], dialect: str) -> List[str]:
 
         try:
             parsed = sqlglot.parse_one(sql, read=dialect)
-            normalized = parsed.sql(dialect=dialect).strip()
+            normalized = _normalize_generated_statement(
+                parsed,
+                backend=backend,
+                dialect=dialect,
+                notes=notes,
+            )
         except Exception:
+            continue
+
+        if not normalized:
             continue
 
         if normalized not in filtered:
             filtered.append(normalized)
     return filtered
+
+
+def _normalize_generated_statement(
+    expression: exp.Expression,
+    backend: str,
+    dialect: str,
+    notes: List[str],
+) -> str | None:
+    if isinstance(expression, exp.Create):
+        kind = str(expression.args.get("kind") or "").upper()
+        if backend == "sqlite" and kind in {"DATABASE", "SCHEMA"}:
+            _append_note_once(notes, "SQLite backend ignores CREATE DATABASE and will use current DB file.")
+            return None
+
+        if kind in {"DATABASE", "SCHEMA", "TABLE", "INDEX"}:
+            expression.set("exists", True)
+
+    if backend == "sqlite":
+        table = expression.find(exp.Table)
+        if table is not None and (table.args.get("db") is not None or table.args.get("catalog") is not None):
+            table.set("db", None)
+            table.set("catalog", None)
+            _append_note_once(
+                notes,
+                "SQLite backend uses the current DB file, so schema-qualified table names were rewritten to local tables.",
+            )
+
+    return expression.sql(dialect=dialect).strip()
 
 
 def _merge_statements(primary: List[str], fallback: List[str]) -> List[str]:
@@ -231,3 +339,8 @@ def _merge_statements(primary: List[str], fallback: List[str]) -> List[str]:
 
 def _default_statement(dialect: str) -> List[str]:
     return [_build_create_table_sql("new_table", dialect=dialect)]
+
+
+def _append_note_once(notes: List[str], note: str) -> None:
+    if note not in notes:
+        notes.append(note)
