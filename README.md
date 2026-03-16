@@ -10,7 +10,7 @@ Repository: [hyphy-void/sql-copilot-agent](https://github.com/hyphy-void/sql-cop
 [![SQLite](https://img.shields.io/badge/SQLite-Default%20DB-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/index.html)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-412991)](https://platform.openai.com/docs/api-reference)
 
-![SQL Copilot Panel](./assets/panel.png)
+![SQL Copilot Panel](./assets/SQL_agent.gif)
 
 ## Features
 
