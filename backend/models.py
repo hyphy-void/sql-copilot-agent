@@ -14,6 +14,16 @@ class SchemaTablesResponse(BaseModel):
     tables: List[str]
 
 
+class SchemaOverviewTable(BaseModel):
+    table: str
+    column_count: int
+    key_columns: List[str]
+
+
+class SchemaOverviewResponse(BaseModel):
+    tables: List[SchemaOverviewTable]
+
+
 class SchemaColumnsResponse(BaseModel):
     table: str
     columns: List[Dict[str, Any]]
@@ -80,9 +90,16 @@ class DDLProposal(BaseModel):
     executed_at: Optional[str] = None
 
 
+class ChatPlanSummary(BaseModel):
+    allowed_count: int
+    blocked_count: int
+    next_action_hint: str
+
+
 class ChatPlanResponse(BaseModel):
     proposal: DDLProposal
     message: str
+    summary: ChatPlanSummary
 
 
 class ApprovalDecision(BaseModel):

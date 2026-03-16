@@ -37,6 +37,9 @@ def test_graph_returns_hybrid_mode_with_llm(tmp_path: Path):
     assert any("order_date" in item for item in result["suggestions"])
     assert "timings_ms" in result["debug"]
     assert result["debug"]["suggestion_sources"]["order_date >= date('now', '-7 day')"] == "llm"
+    assert "ui_context_label" in result["debug"]
+    assert "suggestion_reasons" in result["debug"]
+    assert result["debug"]["suggestion_reasons"]["order_date >= date('now', '-7 day')"]
 
 
 def test_graph_degrades_to_rule_mode_without_llm(tmp_path: Path):
@@ -47,3 +50,4 @@ def test_graph_degrades_to_rule_mode_without_llm(tmp_path: Path):
 
     assert result["mode"] == "rule_only"
     assert result["suggestions"]
+    assert "fallback_reason" in result["debug"]

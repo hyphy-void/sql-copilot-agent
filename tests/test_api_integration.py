@@ -20,6 +20,12 @@ def test_schema_endpoints(client):
     assert tables_response.status_code == 200
     assert "users" in tables_response.json()["tables"]
 
+    overview_response = client.get("/schema/overview")
+    assert overview_response.status_code == 200
+    overview = overview_response.json()["tables"]
+    assert any(item["table"] == "users" for item in overview)
+    assert all("column_count" in item and "key_columns" in item for item in overview)
+
     columns_response = client.get("/schema/columns/users")
     assert columns_response.status_code == 200
     columns = columns_response.json()["columns"]
@@ -39,6 +45,9 @@ def test_autocomplete_rule_mode(client):
     body = response.json()
     assert body["mode"] == "rule_only"
     assert "u.id" in body["suggestions"]
+    assert "ui_context_label" in body["debug"]
+    assert "suggestion_reasons" in body["debug"]
+    assert body["debug"]["suggestion_reasons"]["u.id"]
 
 
 def test_autocomplete_degrades_without_llm_provider(client):
@@ -53,3 +62,5 @@ def test_autocomplete_degrades_without_llm_provider(client):
     body = response.json()
     assert body["mode"] == "rule_only"
     assert body["suggestions"]
+    assert "fallback_reason" in body["debug"]
+    assert "LLM" in body["debug"]["fallback_reason"]

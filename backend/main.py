@@ -22,6 +22,7 @@ from backend.models import (
     ApproveProposalResponse,
     AutocompleteRequest,
     AutocompleteResponse,
+    ChatPlanSummary,
     ChatPlanRequest,
     ChatPlanResponse,
     DDLProposal,
@@ -30,6 +31,8 @@ from backend.models import (
     RejectProposalRequest,
     RejectProposalResponse,
     SchemaColumnsResponse,
+    SchemaOverviewResponse,
+    SchemaOverviewTable,
     SchemaTablesResponse,
 )
 from backend.schema_manager import SchemaManager
@@ -141,6 +144,28 @@ def create_app(
         tables = app.state.schema_manager.get_tables()
         return SchemaTablesResponse(tables=tables)
 
+    @app.get("/schema/overview", response_model=SchemaOverviewResponse)
+    def get_schema_overview() -> SchemaOverviewResponse:
+        overview_tables: list[SchemaOverviewTable] = []
+
+        for table in app.state.schema_manager.get_tables():
+            columns = app.state.schema_manager.get_columns(table)
+            prioritized = sorted(
+                columns,
+                key=lambda column: (0 if bool(column.get("pk")) else 1, str(column.get("name"))),
+            )
+            key_columns = [str(column.get("name")) for column in prioritized[:5] if column.get("name")]
+
+            overview_tables.append(
+                SchemaOverviewTable(
+                    table=table,
+                    column_count=len(columns),
+                    key_columns=key_columns,
+                )
+            )
+
+        return SchemaOverviewResponse(tables=overview_tables)
+
     @app.get("/schema/columns/{table}", response_model=SchemaColumnsResponse)
     def get_columns(table: str) -> SchemaColumnsResponse:
         if table not in app.state.schema_manager.get_tables():
@@ -160,11 +185,16 @@ def create_app(
             prompt=request.prompt,
             use_llm=request.use_llm,
         )
+        summary = _build_chat_plan_summary(proposal)
         if proposal.get("has_blocking_risk"):
             message = "Proposal created with blocked operations. Please revise request before approval."
         else:
             message = "Proposal created. Review then approve to execute."
-        return ChatPlanResponse(proposal=DDLProposal(**proposal), message=message)
+        return ChatPlanResponse(
+            proposal=DDLProposal(**proposal),
+            message=message,
+            summary=ChatPlanSummary(**summary),
+        )
 
     @app.get("/chat/proposals/{proposal_id}", response_model=DDLProposal)
     def get_chat_proposal(proposal_id: str) -> DDLProposal:
@@ -237,3 +267,24 @@ def create_app(
 
 
 app = create_app()
+
+
+def _build_chat_plan_summary(proposal: dict[str, object]) -> dict[str, object]:
+    operations = list(proposal.get("operations") or [])
+    allowed_count = sum(1 for operation in operations if bool(operation.get("allowed")))
+    blocked_count = len(operations) - allowed_count
+
+    if blocked_count > 0:
+        hint = (
+            "包含高风险语句，请先修改请求再执行 / Blocked operations found. Revise request before execution."
+        )
+    else:
+        hint = (
+            "确认无误后输入 APPROVE 再执行 / Review operations, then type APPROVE before execution."
+        )
+
+    return {
+        "allowed_count": allowed_count,
+        "blocked_count": blocked_count,
+        "next_action_hint": hint,
+    }

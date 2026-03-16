@@ -29,9 +29,13 @@ def test_chat_plan_creates_pending_proposal(client):
 
     payload = response.json()
     proposal = payload["proposal"]
+    summary = payload["summary"]
     assert proposal["status"] == "PENDING"
     assert proposal["proposal_id"]
     assert proposal["operations"]
+    assert summary["allowed_count"] >= 1
+    assert summary["blocked_count"] == 0
+    assert "APPROVE" in summary["next_action_hint"]
 
 
 def test_chat_approve_executes_create_table(client):
@@ -72,8 +76,10 @@ def test_blocked_proposal_cannot_be_approved(client):
             "use_llm": False,
         },
     )
+    plan_summary = plan_response.json()["summary"]
     proposal = plan_response.json()["proposal"]
     assert proposal["has_blocking_risk"] is True
+    assert plan_summary["blocked_count"] >= 1
 
     approve_response = client.post(
         f"/chat/proposals/{proposal['proposal_id']}/approve",
@@ -104,7 +110,10 @@ def test_chat_plan_allows_sqlite_database_request_after_normalization(tmp_path: 
     )
     assert plan_response.status_code == 200
 
-    proposal = plan_response.json()["proposal"]
+    payload = plan_response.json()
+    proposal = payload["proposal"]
+    assert payload["summary"]["allowed_count"] == 1
+    assert payload["summary"]["blocked_count"] == 0
     assert proposal["has_blocking_risk"] is False
     assert proposal["operations"] == [
         {
