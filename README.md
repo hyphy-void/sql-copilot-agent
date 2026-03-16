@@ -15,11 +15,13 @@ Repository: [hyphy-void/sql-copilot-agent](https://github.com/hyphy-void/sql-cop
 ## Features
 
 - SQL AST 解析（`sqlglot`）
-- Schema 感知补全（SQLite introspection）
+- Schema 感知补全（SQLite / MySQL）
 - Alias 识别（`users u` -> `u.id`）
 - 规则补全 + LLM 语义补全（OpenAI，可自动降级）
 - LangGraph 工作流（Parse -> Schema -> LLM -> Rank）
-- Monaco 最小可用前端
+- 对话式 DDL：提案 -> 审批 -> 执行
+- DDL 安全守卫：仅允许安全子集（CREATE/ADD COLUMN）
+- 审批审计落盘（本地 SQLite）
 
 ## Project Structure
 
@@ -81,6 +83,16 @@ MODEL_ID=qwen3-coder-next
 
 DB_PATH=./db/demo.db
 INIT_SQL_PATH=./db/init.sql
+DB_BACKEND=sqlite
+AUDIT_DB_PATH=./db/audit.db
+
+# MySQL (optional)
+# MYSQL_DSN=mysql+pymysql://root:password@127.0.0.1:3306/test_db
+# MYSQL_HOST=127.0.0.1
+# MYSQL_PORT=3306
+# MYSQL_USER=root
+# MYSQL_PASSWORD=
+# MYSQL_DATABASE=test_db
 ```
 
 ### 3) 字段说明
@@ -89,8 +101,11 @@ INIT_SQL_PATH=./db/init.sql
 - `BASE_URL`：OpenAI Compatible 网关地址（阿里百炼示例见上）
 - `OPENAI_COMPATIBLE_API_KEY`：百炼/Coding Plan API Key
 - `MODEL_ID`：模型 ID（例如 `qwen3.5-plus`）
+- `DB_BACKEND`：`sqlite`（默认）或 `mysql`
 - `DB_PATH`：SQLite 数据文件路径（默认 `./db/demo.db`）
 - `INIT_SQL_PATH`：初始化脚本路径（默认 `./db/init.sql`）
+- `AUDIT_DB_PATH`：DDL 审计库路径（默认 `./db/audit.db`）
+- `MYSQL_DSN` 或 `MYSQL_HOST/PORT/USER/PASSWORD/DATABASE`：MySQL 连接配置
 - 兼容旧字段：`LLM_PROVIDER` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`
 
 没有设置 API Key（`OPENAI_COMPATIBLE_API_KEY` 或 `OPENAI_API_KEY`）时，`/autocomplete` 自动降级为规则补全并返回 `mode=rule_only`。
@@ -135,6 +150,78 @@ Request:
   "cursor": 9,
   "max_suggestions": 10,
   "use_llm": true
+}
+```
+
+### `GET /db/capabilities`
+
+```json
+{
+  "backend": "sqlite",
+  "dialect": "sqlite",
+  "connected": true,
+  "supports_create_database": false,
+  "allowed_ddl": [
+    "CREATE DATABASE",
+    "CREATE TABLE",
+    "CREATE INDEX",
+    "ALTER TABLE ADD COLUMN"
+  ]
+}
+```
+
+### `POST /chat/plan`
+
+Request:
+
+```json
+{
+  "prompt": "创建 crm 库并建 users 表",
+  "use_llm": true
+}
+```
+
+Response（节选）:
+
+```json
+{
+  "message": "Proposal created. Review then approve to execute.",
+  "proposal": {
+    "proposal_id": "a1b2c3d4e5f6",
+    "status": "PENDING",
+    "approval_token": "token...",
+    "has_blocking_risk": false,
+    "operations": [
+      {
+        "statement": "CREATE TABLE IF NOT EXISTS users (...)",
+        "operation_type": "create_table",
+        "allowed": true,
+        "risk_level": "safe",
+        "reason": "Allowed by safe DDL policy."
+      }
+    ]
+  }
+}
+```
+
+### `POST /chat/proposals/{id}/approve`
+
+Request:
+
+```json
+{
+  "approval_token": "token...",
+  "approver": "web-ui"
+}
+```
+
+### `POST /chat/proposals/{id}/reject`
+
+Request:
+
+```json
+{
+  "reason": "Manual reject from UI"
 }
 ```
 

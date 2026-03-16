@@ -30,3 +30,83 @@ class AutocompleteResponse(BaseModel):
     suggestions: List[str]
     mode: Literal["rule_only", "hybrid"]
     debug: Optional[Dict[str, Any]] = None
+
+
+DDLStatus = Literal["PENDING", "APPROVED", "REJECTED", "EXECUTED", "FAILED"]
+DDLRiskLevel = Literal["safe", "blocked"]
+StatementStatus = Literal["success", "error"]
+
+
+class ChatPlanRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    use_llm: bool = True
+
+
+class DDLOperation(BaseModel):
+    statement: str
+    operation_type: str
+    allowed: bool
+    risk_level: DDLRiskLevel
+    reason: str
+
+
+class ExecutionResult(BaseModel):
+    statement: str
+    status: StatementStatus
+    duration_ms: float
+    error: Optional[str] = None
+
+
+class DDLProposal(BaseModel):
+    proposal_id: str
+    request_text: str
+    backend: str
+    dialect: str
+    source: str
+    status: DDLStatus
+    approval_token: str
+    has_blocking_risk: bool
+    risk_summary: str
+    notes: List[str]
+    operations: List[DDLOperation]
+    execution_results: List[ExecutionResult]
+    rejection_reason: Optional[str] = None
+    error_message: Optional[str] = None
+    approver: Optional[str] = None
+    created_at: str
+    updated_at: str
+    approved_at: Optional[str] = None
+    rejected_at: Optional[str] = None
+    executed_at: Optional[str] = None
+
+
+class ChatPlanResponse(BaseModel):
+    proposal: DDLProposal
+    message: str
+
+
+class ApprovalDecision(BaseModel):
+    approval_token: str = Field(..., min_length=6)
+    approver: Optional[str] = None
+
+
+class ApproveProposalResponse(BaseModel):
+    proposal: DDLProposal
+    message: str
+
+
+class RejectProposalRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class RejectProposalResponse(BaseModel):
+    proposal: DDLProposal
+    message: str
+
+
+class DatabaseCapabilitiesResponse(BaseModel):
+    backend: str
+    dialect: str
+    connected: bool
+    supports_create_database: bool
+    allowed_ddl: List[str]

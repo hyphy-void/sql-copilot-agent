@@ -7,6 +7,14 @@ def test_health(client):
     assert payload["llm_enabled"] is False
 
 
+def test_db_capabilities(client):
+    response = client.get("/db/capabilities")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["backend"] == "sqlite"
+    assert payload["connected"] is True
+
+
 def test_schema_endpoints(client):
     tables_response = client.get("/schema/tables")
     assert tables_response.status_code == 200

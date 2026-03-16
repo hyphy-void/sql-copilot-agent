@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>SQL Copilot Agent</title>
     <style>
       :root {
@@ -228,6 +231,131 @@
         font-size: 12px;
       }
 
+      .tabs {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .tab-btn {
+        background: #fff6eb;
+        color: #5f564e;
+        border: 1px solid var(--border);
+      }
+
+      .tab-btn.active {
+        background: var(--accent);
+        color: white;
+        border-color: transparent;
+      }
+
+      .panel-body {
+        display: block;
+      }
+
+      .panel-body.hidden {
+        display: none;
+      }
+
+      #chat-stream {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        height: min(34vh, 280px);
+        overflow: auto;
+        background: #fff;
+        display: grid;
+        gap: 8px;
+      }
+
+      .chat-msg {
+        border: 1px solid #e8ddd2;
+        border-radius: 8px;
+        padding: 8px;
+        font-size: 12px;
+        line-height: 1.45;
+        background: #fffaf4;
+      }
+
+      .chat-msg.user {
+        background: #eef7ff;
+        border-color: #cbe5ff;
+      }
+
+      .chat-role {
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+
+      #chat-input {
+        width: 100%;
+        min-height: 76px;
+        resize: vertical;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px 10px;
+        font-family: inherit;
+      }
+
+      .chat-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      #proposal-box {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        background: #fff;
+        display: grid;
+        gap: 8px;
+      }
+
+      #proposal-meta {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      #proposal-ops {
+        margin: 0;
+        padding-left: 18px;
+        font-size: 12px;
+        display: grid;
+        gap: 6px;
+      }
+
+      .risk-badge {
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 11px;
+        border: 1px solid var(--border);
+        width: fit-content;
+      }
+
+      .risk-badge.safe {
+        color: #095a53;
+        background: #dff7f2;
+        border-color: #b2e8dd;
+      }
+
+      .risk-badge.blocked {
+        color: #8f200f;
+        background: #fdece8;
+        border-color: #f3c8be;
+      }
+
+      .proposal-buttons {
+        display: flex;
+        gap: 8px;
+      }
+
+      .ghost-btn {
+        background: #fff8ef;
+        color: #5f564e;
+        border: 1px solid var(--border);
+      }
+
       @media (max-width: 900px) {
         .layout {
           width: 100%;
@@ -265,14 +393,42 @@
           <div id="status">Ready. Press Ctrl/Cmd + Space in editor.</div>
         </div>
 
-        <div>
+        <div class="tabs">
+          <button id="tab-suggestions" class="tab-btn active">Suggestions</button>
+          <button id="tab-chat" class="tab-btn">Agent Chat</button>
+        </div>
+
+        <section id="suggestions-panel" class="panel-body">
           <h3>Top Suggestions</h3>
           <p class="shortcut-hint">Rule 先返回，LLM 后补充；Tab 接受幽灵补全，Alt+1..9 选择建议</p>
           <ul id="suggestions"></ul>
-        </div>
+        </section>
+
+        <section id="chat-panel" class="panel-body hidden">
+          <h3>Schema Agent</h3>
+          <div id="chat-stream"></div>
+          <textarea
+            id="chat-input"
+            placeholder="示例：创建 crm 库并建 users 表，字段有 id、name、email"
+          ></textarea>
+          <div class="chat-actions">
+            <button id="chat-plan">Generate Plan</button>
+            <button id="chat-refresh" class="ghost-btn">Refresh Proposal</button>
+          </div>
+
+          <div id="proposal-box">
+            <div id="proposal-meta">No proposal yet.</div>
+            <span id="proposal-risk" class="risk-badge safe">SAFE</span>
+            <ol id="proposal-ops"></ol>
+            <div class="proposal-buttons">
+              <button id="proposal-approve">Approve & Execute</button>
+              <button id="proposal-reject" class="ghost-btn">Reject</button>
+            </div>
+          </div>
+        </section>
       </aside>
     </div>
 
-    <script src="/monaco.js"></script>
+    <script src="/monaco.js?v=20260316-1"></script>
   </body>
 </html>

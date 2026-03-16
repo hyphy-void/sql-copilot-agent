@@ -17,10 +17,12 @@ from backend.main import create_app
 def app(tmp_path: Path):
     db_path = tmp_path / "test.db"
     init_sql_path = ROOT_DIR / "db" / "init.sql"
+    audit_db_path = tmp_path / "audit.db"
 
     return create_app(
         db_path=db_path,
         init_sql_path=init_sql_path,
+        audit_db_path=audit_db_path,
         enable_llm=False,
     )
 

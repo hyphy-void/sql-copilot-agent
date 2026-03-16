@@ -22,6 +22,11 @@ class BaseLLMProvider(ABC):
     ) -> List[str]:
         raise NotImplementedError
 
+    def generate_ddl_candidates(
+        self, intent: str, schema_snapshot: Dict[str, List[str]], dialect: str
+    ) -> List[str]:
+        return []
+
 
 class OpenAIProvider(BaseLLMProvider):
     def __init__(
@@ -71,6 +76,45 @@ class OpenAIProvider(BaseLLMProvider):
                     f"Schema:\n{chr(10).join(schema_lines)}\n\n"
                     "Complete this SQL prefix with practical suggestions:\n"
                     f"{sql_prefix}"
+                ),
+            },
+        ]
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.1,
+            messages=messages,
+        )
+
+        content = ""
+        if response.choices and response.choices[0].message:
+            content = response.choices[0].message.content or ""
+
+        return _parse_suggestions(content)
+
+    def generate_ddl_candidates(
+        self, intent: str, schema_snapshot: Dict[str, List[str]], dialect: str
+    ) -> List[str]:
+        schema_lines = [
+            f"{table}({', '.join(columns)})" for table, columns in schema_snapshot.items()
+        ]
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a SQL schema migration assistant. "
+                    "Generate 1-5 SQL DDL statements only. "
+                    "Output JSON array of SQL strings. Do not include markdown."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Dialect: {dialect}\n"
+                    f"Schema:\n{chr(10).join(schema_lines)}\n\n"
+                    f"Intent:\n{intent}\n\n"
+                    "Return only DDL SQL statements."
                 ),
             },
         ]

@@ -6,11 +6,159 @@ let activeSuggestions = [];
 let inlinePreview = null;
 let refreshTimer = null;
 let requestSeq = 0;
+let activeProposal = null;
 
 function setStatus(message, isError = false) {
   const statusEl = document.getElementById("status");
+  if (!statusEl) {
+    return;
+  }
   statusEl.textContent = message;
   statusEl.classList.toggle("error", isError);
+}
+
+function switchPanel(target) {
+  const suggestionPanel = document.getElementById("suggestions-panel");
+  const chatPanel = document.getElementById("chat-panel");
+  const suggestionTab = document.getElementById("tab-suggestions");
+  const chatTab = document.getElementById("tab-chat");
+  if (!suggestionPanel || !chatPanel || !suggestionTab || !chatTab) {
+    return;
+  }
+
+  if (target === "chat") {
+    suggestionPanel.classList.add("hidden");
+    chatPanel.classList.remove("hidden");
+    suggestionTab.classList.remove("active");
+    chatTab.classList.add("active");
+    return;
+  }
+
+  suggestionPanel.classList.remove("hidden");
+  chatPanel.classList.add("hidden");
+  suggestionTab.classList.add("active");
+  chatTab.classList.remove("active");
+}
+
+function appendChatMessage(role, text) {
+  const stream = document.getElementById("chat-stream");
+  if (!stream) {
+    return;
+  }
+  const item = document.createElement("div");
+  item.className = `chat-msg ${role === "user" ? "user" : "assistant"}`;
+
+  const roleEl = document.createElement("div");
+  roleEl.className = "chat-role";
+  roleEl.textContent = role === "user" ? "You" : "Agent";
+
+  const body = document.createElement("div");
+  body.textContent = text;
+
+  item.appendChild(roleEl);
+  item.appendChild(body);
+  stream.appendChild(item);
+  stream.scrollTop = stream.scrollHeight;
+}
+
+function readApiError(payload, fallback) {
+  if (!payload) {
+    return fallback;
+  }
+
+  if (typeof payload.detail === "string" && payload.detail.trim()) {
+    return payload.detail;
+  }
+
+  if (typeof payload.message === "string" && payload.message.trim()) {
+    return payload.message;
+  }
+
+  return fallback;
+}
+
+function renderProposal(proposal) {
+  activeProposal = proposal || null;
+
+  const meta = document.getElementById("proposal-meta");
+  const risk = document.getElementById("proposal-risk");
+  const ops = document.getElementById("proposal-ops");
+  const approveBtn = document.getElementById("proposal-approve");
+  const rejectBtn = document.getElementById("proposal-reject");
+  if (!meta || !risk || !ops || !approveBtn || !rejectBtn) {
+    return;
+  }
+
+  if (!proposal) {
+    meta.textContent = "No proposal yet.";
+    risk.textContent = "SAFE";
+    risk.className = "risk-badge safe";
+    ops.innerHTML = "";
+    approveBtn.disabled = true;
+    rejectBtn.disabled = true;
+    return;
+  }
+
+  const blocking = !!proposal.has_blocking_risk;
+  meta.textContent = `#${proposal.proposal_id} | ${proposal.status} | ${proposal.backend.toUpperCase()} (${proposal.source})`;
+  risk.textContent = blocking ? "BLOCKED" : "SAFE";
+  risk.className = `risk-badge ${blocking ? "blocked" : "safe"}`;
+
+  ops.innerHTML = "";
+  (proposal.operations || []).forEach((operation) => {
+    const item = document.createElement("li");
+    const tag = operation.allowed ? "[SAFE]" : "[BLOCKED]";
+    item.textContent = `${tag} ${operation.statement} (${operation.reason})`;
+    ops.appendChild(item);
+  });
+
+  const canApprove = proposal.status === "PENDING" && !blocking;
+  const canReject = proposal.status === "PENDING";
+  approveBtn.disabled = !canApprove;
+  rejectBtn.disabled = !canReject;
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(readApiError(payload, `Request failed (${response.status})`));
+  }
+  return payload;
+}
+
+async function createChatPlan(prompt, useLLM) {
+  return fetchJson(`${API_BASE}/chat/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      use_llm: useLLM,
+    }),
+  });
+}
+
+async function getProposal(proposalId) {
+  return fetchJson(`${API_BASE}/chat/proposals/${proposalId}`);
+}
+
+async function approveProposal(proposalId, approvalToken) {
+  return fetchJson(`${API_BASE}/chat/proposals/${proposalId}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      approval_token: approvalToken,
+      approver: "web-ui",
+    }),
+  });
+}
+
+async function rejectProposal(proposalId, reason) {
+  return fetchJson(`${API_BASE}/chat/proposals/${proposalId}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
 }
 
 function normalizeSource(value) {
@@ -431,6 +579,112 @@ function scheduleLiveRefresh(delayMs = 130) {
   }, delayMs);
 }
 
+async function submitChatPlan() {
+  const input = document.getElementById("chat-input");
+  if (!input) {
+    setStatus("Chat input not found. Please refresh the page.", true);
+    return;
+  }
+  const prompt = (input.value || "").trim();
+  if (!prompt) {
+    setStatus("Please enter a schema request first.", true);
+    return;
+  }
+
+  appendChatMessage("user", prompt);
+  setStatus("Generating DDL proposal...");
+
+  try {
+    const payload = await createChatPlan(
+      prompt,
+      document.getElementById("use-llm").checked
+    );
+    renderProposal(payload.proposal);
+    appendChatMessage("assistant", payload.message || "Proposal created.");
+    setStatus("Proposal created. Review risk and approve if safe.");
+  } catch (error) {
+    appendChatMessage("assistant", error.message);
+    setStatus(error.message, true);
+  }
+}
+
+async function refreshChatProposal() {
+  if (!activeProposal?.proposal_id) {
+    setStatus("No proposal to refresh.", true);
+    return;
+  }
+
+  try {
+    const payload = await getProposal(activeProposal.proposal_id);
+    renderProposal(payload);
+    setStatus(`Proposal ${payload.proposal_id} refreshed.`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+async function approveChatProposal() {
+  if (!activeProposal?.proposal_id) {
+    setStatus("No proposal available for approval.", true);
+    return;
+  }
+
+  try {
+    const payload = await approveProposal(
+      activeProposal.proposal_id,
+      activeProposal.approval_token
+    );
+    renderProposal(payload.proposal);
+
+    const failedCount = (payload.proposal.execution_results || []).filter(
+      (item) => item.status === "error"
+    ).length;
+    if (failedCount > 0) {
+      appendChatMessage(
+        "assistant",
+        `Execution finished with ${failedCount} failed statement(s).`
+      );
+      setStatus(payload.message || "Execution finished with failures.", true);
+    } else {
+      appendChatMessage("assistant", "Execution succeeded.");
+      setStatus(payload.message || "Execution succeeded.");
+      scheduleLiveRefresh(30);
+    }
+  } catch (error) {
+    appendChatMessage("assistant", error.message);
+    setStatus(error.message, true);
+  }
+}
+
+async function rejectChatProposal() {
+  if (!activeProposal?.proposal_id) {
+    setStatus("No proposal available for reject action.", true);
+    return;
+  }
+
+  try {
+    const payload = await rejectProposal(
+      activeProposal.proposal_id,
+      "Rejected from web UI"
+    );
+    renderProposal(payload.proposal);
+    appendChatMessage("assistant", payload.message || "Proposal rejected.");
+    setStatus("Proposal rejected.");
+  } catch (error) {
+    appendChatMessage("assistant", error.message);
+    setStatus(error.message, true);
+  }
+}
+
+function bindClick(id, handler) {
+  const element = document.getElementById(id);
+  if (!element) {
+    console.warn(`Missing element: #${id}`);
+    return;
+  }
+  element.addEventListener("click", handler);
+}
+
 require.config({
   paths: {
     vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs",
@@ -527,10 +781,19 @@ require(["vs/editor/editor.main"], () => {
     },
   });
 
-  document.getElementById("run-complete").addEventListener("click", manualSuggest);
-  document.getElementById("use-llm").addEventListener("change", () => {
-    scheduleLiveRefresh(30);
-  });
+  bindClick("run-complete", manualSuggest);
+  const useLlmInput = document.getElementById("use-llm");
+  if (useLlmInput) {
+    useLlmInput.addEventListener("change", () => {
+      scheduleLiveRefresh(30);
+    });
+  }
+  bindClick("tab-suggestions", () => switchPanel("suggestions"));
+  bindClick("tab-chat", () => switchPanel("chat"));
+  bindClick("chat-plan", submitChatPlan);
+  bindClick("chat-refresh", refreshChatProposal);
+  bindClick("proposal-approve", approveChatProposal);
+  bindClick("proposal-reject", rejectChatProposal);
 
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space, () => {
     editor.trigger("keyboard", "editor.action.triggerSuggest", {});
@@ -574,6 +837,12 @@ require(["vs/editor/editor.main"], () => {
 
   setStatus(
     "Ready. Rule suggestions return first; Tab accepts ghost text; Alt+1..9 inserts right-panel suggestions."
+  );
+  switchPanel("suggestions");
+  renderProposal(null);
+  appendChatMessage(
+    "assistant",
+    "Describe the schema change you want. I will propose DDL first, then wait for approval."
   );
   scheduleLiveRefresh(40);
 });

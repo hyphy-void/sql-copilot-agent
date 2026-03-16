@@ -12,16 +12,28 @@ from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 from agent.graph import AutocompleteGraphEngine
+from backend.audit_store import AuditStore
 from backend.autocomplete_engine import AutocompleteEngine
+from backend.database import ConnectionManager, SQLiteAdapter
+from backend.ddl_planner import DDLPlanner
 from backend.llm import BaseLLMProvider, build_llm_provider
 from backend.models import (
+    ApprovalDecision,
+    ApproveProposalResponse,
     AutocompleteRequest,
     AutocompleteResponse,
+    ChatPlanRequest,
+    ChatPlanResponse,
+    DDLProposal,
+    DatabaseCapabilitiesResponse,
     HealthResponse,
+    RejectProposalRequest,
+    RejectProposalResponse,
     SchemaColumnsResponse,
     SchemaTablesResponse,
 )
 from backend.schema_manager import SchemaManager
+from backend.tool_registry import ToolRegistry
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,12 +43,14 @@ load_dotenv()
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = ROOT_DIR / "db" / "demo.db"
 DEFAULT_INIT_SQL_PATH = ROOT_DIR / "db" / "init.sql"
+DEFAULT_AUDIT_DB_PATH = ROOT_DIR / "db" / "audit.db"
 FRONTEND_DIR = ROOT_DIR / "frontend"
 
 
 def create_app(
     db_path: Optional[str | Path] = None,
     init_sql_path: Optional[str | Path] = None,
+    audit_db_path: Optional[str | Path] = None,
     enable_llm: bool = True,
     llm_provider: BaseLLMProvider | None = None,
 ) -> FastAPI:
@@ -52,9 +66,16 @@ def create_app(
 
     configured_db_path = Path(db_path or os.getenv("DB_PATH", DEFAULT_DB_PATH))
     configured_init_sql = Path(init_sql_path or os.getenv("INIT_SQL_PATH", DEFAULT_INIT_SQL_PATH))
+    configured_audit_db_path = Path(audit_db_path or os.getenv("AUDIT_DB_PATH", DEFAULT_AUDIT_DB_PATH))
 
-    schema_manager = SchemaManager(configured_db_path)
-    schema_manager.initialize(configured_init_sql)
+    if db_path is not None:
+        connection_manager = ConnectionManager(SQLiteAdapter(configured_db_path))
+    else:
+        connection_manager = ConnectionManager.from_env(default_db_path=configured_db_path)
+
+    schema_manager = SchemaManager(connection_manager.get_adapter())
+    if connection_manager.get_adapter().backend_name == "sqlite":
+        schema_manager.initialize(configured_init_sql)
 
     autocomplete_engine = AutocompleteEngine(schema_manager)
     effective_llm_provider = llm_provider
@@ -66,23 +87,47 @@ def create_app(
         schema_manager=schema_manager,
         llm_provider=effective_llm_provider,
     )
+    ddl_planner = DDLPlanner(llm_provider=effective_llm_provider)
+    audit_store = AuditStore(configured_audit_db_path)
+    tool_registry = ToolRegistry(
+        adapter=connection_manager.get_adapter(),
+        schema_manager=schema_manager,
+        planner=ddl_planner,
+        audit_store=audit_store,
+    )
 
     app.state.schema_manager = schema_manager
     app.state.graph_engine = graph_engine
+    app.state.connection_manager = connection_manager
+    app.state.tool_registry = tool_registry
 
     @app.get("/", include_in_schema=False)
     def serve_frontend() -> FileResponse:
         index_file = FRONTEND_DIR / "index.html"
         if not index_file.exists():
             raise HTTPException(status_code=404, detail="Frontend file not found")
-        return FileResponse(index_file)
+        return FileResponse(
+            index_file,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     @app.get("/monaco.js", include_in_schema=False)
     def serve_monaco_script() -> FileResponse:
         script_file = FRONTEND_DIR / "monaco.js"
         if not script_file.exists():
             raise HTTPException(status_code=404, detail="Monaco script not found")
-        return FileResponse(script_file)
+        return FileResponse(
+            script_file,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -103,6 +148,65 @@ def create_app(
 
         columns = app.state.schema_manager.get_columns(table)
         return SchemaColumnsResponse(table=table, columns=columns)
+
+    @app.get("/db/capabilities", response_model=DatabaseCapabilitiesResponse)
+    def db_capabilities() -> DatabaseCapabilitiesResponse:
+        capabilities = app.state.connection_manager.get_capabilities()
+        return DatabaseCapabilitiesResponse(**capabilities)
+
+    @app.post("/chat/plan", response_model=ChatPlanResponse)
+    def chat_plan(request: ChatPlanRequest) -> ChatPlanResponse:
+        proposal = app.state.tool_registry.propose_ddl(
+            prompt=request.prompt,
+            use_llm=request.use_llm,
+        )
+        if proposal.get("has_blocking_risk"):
+            message = "Proposal created with blocked operations. Please revise request before approval."
+        else:
+            message = "Proposal created. Review then approve to execute."
+        return ChatPlanResponse(proposal=DDLProposal(**proposal), message=message)
+
+    @app.get("/chat/proposals/{proposal_id}", response_model=DDLProposal)
+    def get_chat_proposal(proposal_id: str) -> DDLProposal:
+        proposal = app.state.tool_registry.get_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+        return DDLProposal(**proposal)
+
+    @app.post("/chat/proposals/{proposal_id}/approve", response_model=ApproveProposalResponse)
+    def approve_chat_proposal(
+        proposal_id: str, request: ApprovalDecision
+    ) -> ApproveProposalResponse:
+        try:
+            proposal = app.state.tool_registry.approve_proposal(
+                proposal_id=proposal_id,
+                approval_token=request.approval_token,
+                approver=request.approver,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        message = (
+            "DDL executed with failures." if proposal.get("status") == "FAILED" else "DDL executed."
+        )
+        return ApproveProposalResponse(proposal=DDLProposal(**proposal), message=message)
+
+    @app.post("/chat/proposals/{proposal_id}/reject", response_model=RejectProposalResponse)
+    def reject_chat_proposal(
+        proposal_id: str, request: RejectProposalRequest
+    ) -> RejectProposalResponse:
+        proposal = app.state.tool_registry.reject_proposal(
+            proposal_id=proposal_id,
+            reason=request.reason,
+        )
+        if proposal is None:
+            raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+        return RejectProposalResponse(
+            proposal=DDLProposal(**proposal),
+            message="Proposal rejected.",
+        )
 
     @app.post("/autocomplete", response_model=AutocompleteResponse)
     def autocomplete(request: AutocompleteRequest) -> AutocompleteResponse:
