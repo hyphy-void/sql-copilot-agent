@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from time import perf_counter
 from typing import Optional
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 from agent.graph import AutocompleteGraphEngine
 from backend.audit_store import AuditStore
 from backend.autocomplete_engine import AutocompleteEngine
+from backend.config import AppConfig
 from backend.database import ConnectionManager, SQLiteAdapter
 from backend.ddl_planner import DDLPlanner
 from backend.llm import BaseLLMProvider, build_llm_provider
@@ -44,9 +46,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH = ROOT_DIR / "db" / "demo.db"
-DEFAULT_INIT_SQL_PATH = ROOT_DIR / "db" / "init.sql"
-DEFAULT_AUDIT_DB_PATH = ROOT_DIR / "db" / "audit.db"
 FRONTEND_DIR = ROOT_DIR / "frontend"
 
 
@@ -67,22 +66,26 @@ def create_app(
         allow_headers=["*"],
     )
 
-    configured_db_path = Path(db_path or os.getenv("DB_PATH", DEFAULT_DB_PATH))
-    configured_init_sql = Path(init_sql_path or os.getenv("INIT_SQL_PATH", DEFAULT_INIT_SQL_PATH))
-    configured_audit_db_path = Path(audit_db_path or os.getenv("AUDIT_DB_PATH", DEFAULT_AUDIT_DB_PATH))
+    config = AppConfig.from_env(
+        root_dir=ROOT_DIR,
+        db_path=db_path,
+        init_sql_path=init_sql_path,
+        audit_db_path=audit_db_path,
+        enable_llm=enable_llm,
+    )
 
     if db_path is not None:
-        connection_manager = ConnectionManager(SQLiteAdapter(configured_db_path))
+        connection_manager = ConnectionManager(SQLiteAdapter(config.db_path))
     else:
-        connection_manager = ConnectionManager.from_env(default_db_path=configured_db_path)
+        connection_manager = ConnectionManager.from_env(default_db_path=config.db_path)
 
     schema_manager = SchemaManager(connection_manager.get_adapter())
     if connection_manager.get_adapter().backend_name == "sqlite":
-        schema_manager.initialize(configured_init_sql)
+        schema_manager.initialize(config.init_sql_path)
 
     autocomplete_engine = AutocompleteEngine(schema_manager)
     effective_llm_provider = llm_provider
-    if effective_llm_provider is None and enable_llm:
+    if effective_llm_provider is None and config.llm.enabled:
         effective_llm_provider = build_llm_provider()
 
     graph_engine = AutocompleteGraphEngine(
@@ -91,7 +94,7 @@ def create_app(
         llm_provider=effective_llm_provider,
     )
     ddl_planner = DDLPlanner(llm_provider=effective_llm_provider)
-    audit_store = AuditStore(configured_audit_db_path)
+    audit_store = AuditStore(config.audit_db_path)
     tool_registry = ToolRegistry(
         adapter=connection_manager.get_adapter(),
         schema_manager=schema_manager,
@@ -103,6 +106,51 @@ def create_app(
     app.state.graph_engine = graph_engine
     app.state.connection_manager = connection_manager
     app.state.tool_registry = tool_registry
+    app.state.config = config
+
+    @app.middleware("http")
+    async def observability_middleware(request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID") or uuid4().hex
+        request.state.request_id = request_id
+        start = perf_counter()
+        try:
+            response = await call_next(request)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            duration_ms = round((perf_counter() - start) * 1000, 3)
+            logger.exception(
+                "request_failed",
+                extra={
+                    "request_id": request_id,
+                    "path": request.url.path,
+                    "method": request.method,
+                    "duration_ms": duration_ms,
+                },
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error_code": "internal_error",
+                    "message": str(exc),
+                    "request_id": request_id,
+                },
+            )
+
+        duration_ms = round((perf_counter() - start) * 1000, 3)
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Response-Time-MS"] = str(duration_ms)
+        logger.info(
+            "request_complete",
+            extra={
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        return response
 
     @app.get("/", include_in_schema=False)
     def serve_frontend() -> FileResponse:
@@ -137,6 +185,7 @@ def create_app(
         return HealthResponse(
             status="ok",
             llm_enabled=app.state.graph_engine.llm_provider is not None,
+            safe_mode=app.state.config.safe_mode,
         )
 
     @app.get("/schema/tables", response_model=SchemaTablesResponse)
@@ -184,6 +233,9 @@ def create_app(
         proposal = app.state.tool_registry.propose_ddl(
             prompt=request.prompt,
             use_llm=request.use_llm,
+            actor_id=request.actor_id,
+            session_id=request.session_id,
+            source=request.source,
         )
         summary = _build_chat_plan_summary(proposal)
         if proposal.get("has_blocking_risk"):
@@ -218,9 +270,12 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        message = (
-            "DDL executed with failures." if proposal.get("status") == "FAILED" else "DDL executed."
-        )
+        if proposal.get("status") == "PARTIAL":
+            message = "DDL partially executed; review execution results before retrying."
+        elif proposal.get("status") == "FAILED":
+            message = "DDL executed with failures."
+        else:
+            message = "DDL executed."
         return ApproveProposalResponse(proposal=DDLProposal(**proposal), message=message)
 
     @app.post("/chat/proposals/{proposal_id}/reject", response_model=RejectProposalResponse)
@@ -260,6 +315,8 @@ def create_app(
         return AutocompleteResponse(
             suggestions=result.get("suggestions", []),
             mode=result.get("mode", "rule_only"),
+            strategy=result.get("strategy", "rule_only"),
+            items=result.get("items", []),
             debug=debug_payload,
         )
 

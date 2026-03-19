@@ -1,0 +1,32 @@
+[
+  {
+    "name": "alias column completion",
+    "sql": "SELECT u. FROM users u",
+    "cursor": 9,
+    "expected_any": ["u.id", "u.email"]
+  },
+  {
+    "name": "join inference",
+    "sql": "SELECT * FROM orders JOIN us",
+    "cursor": 28,
+    "expected_any": ["JOIN users ON orders.user_id = users.id"]
+  },
+  {
+    "name": "where suggestions",
+    "sql": "SELECT * FROM orders WHERE ",
+    "cursor": 27,
+    "expected_any": ["orders.order_date", "orders.status"]
+  },
+  {
+    "name": "group by suggestions",
+    "sql": "SELECT user_id, COUNT(*) FROM orders GROUP BY ",
+    "cursor": 46,
+    "expected_any": ["orders.user_id"]
+  },
+  {
+    "name": "recovery suggestions",
+    "sql": "SELECT (",
+    "cursor": 8,
+    "expected_strategy": "recovery"
+  }
+]

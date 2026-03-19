@@ -511,13 +511,16 @@ WHERE order_date >= NOW() - INTERVAL 7 DAY
 运行：
 
 ```
-pip install -r requirements.txt
+uv python install 3.11
+uv venv --python 3.11
+source .venv/bin/activate
+uv sync --dev
 ```
 
 启动：
 
 ```
-uvicorn main:app --reload
+uv run uvicorn backend.main:app --reload
 ```
 
 前端：

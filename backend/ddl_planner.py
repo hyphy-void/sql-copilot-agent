@@ -25,6 +25,7 @@ class DDLPlanner:
         use_llm: bool = True,
     ) -> Dict[str, object]:
         cleaned_prompt = (prompt or "").strip()
+        normalized_intent = re.sub(r"\s+", " ", cleaned_prompt)
         explicit_sql = _extract_explicit_sql(cleaned_prompt, dialect=dialect)
         notes: List[str] = []
 
@@ -33,6 +34,7 @@ class DDLPlanner:
                 "statements": explicit_sql,
                 "source": "explicit_sql",
                 "notes": notes,
+                "normalized_intent": normalized_intent,
             }
 
         template_statements, template_notes = _build_template_statements(
@@ -72,6 +74,7 @@ class DDLPlanner:
             "statements": merged[:20],
             "source": source,
             "notes": notes,
+            "normalized_intent": normalized_intent,
         }
 
 

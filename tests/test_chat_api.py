@@ -23,6 +23,9 @@ def test_chat_plan_creates_pending_proposal(client):
         json={
             "prompt": "创建 demo_users 表",
             "use_llm": False,
+            "actor_id": "tester",
+            "session_id": "session-1",
+            "source": "web-ui",
         },
     )
     assert response.status_code == 200
@@ -33,6 +36,12 @@ def test_chat_plan_creates_pending_proposal(client):
     assert proposal["status"] == "PENDING"
     assert proposal["proposal_id"]
     assert proposal["operations"]
+    assert proposal["risk_level"] in {"safe", "warning"}
+    assert proposal["normalized_intent"]
+    assert proposal["impact_summary"]
+    assert proposal["preflight_checks"]
+    assert proposal["actor_id"] == "tester"
+    assert proposal["session_id"] == "session-1"
     assert summary["allowed_count"] >= 1
     assert summary["blocked_count"] == 0
     assert "APPROVE" in summary["next_action_hint"]
@@ -80,6 +89,7 @@ def test_blocked_proposal_cannot_be_approved(client):
     proposal = plan_response.json()["proposal"]
     assert proposal["has_blocking_risk"] is True
     assert plan_summary["blocked_count"] >= 1
+    assert proposal["risk_level"] == "blocked"
 
     approve_response = client.post(
         f"/chat/proposals/{proposal['proposal_id']}/approve",
@@ -115,6 +125,7 @@ def test_chat_plan_allows_sqlite_database_request_after_normalization(tmp_path: 
     assert payload["summary"]["allowed_count"] == 1
     assert payload["summary"]["blocked_count"] == 0
     assert proposal["has_blocking_risk"] is False
+    assert proposal["risk_level"] == "safe"
     assert proposal["operations"] == [
         {
             "statement": "CREATE TABLE IF NOT EXISTS crm_users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)",
@@ -122,6 +133,16 @@ def test_chat_plan_allows_sqlite_database_request_after_normalization(tmp_path: 
             "allowed": True,
             "risk_level": "safe",
             "reason": "Allowed by safe DDL policy.",
+            "impact_summary": "Adds a new table 'crm_users' to the schema.",
+            "preflight_checks": [
+                {
+                    "name": "table_exists_check",
+                    "status": "pass",
+                    "detail": "Table 'crm_users' does not exist yet.",
+                }
+            ],
+            "idempotency": "Idempotent when IF NOT EXISTS is present.",
+            "rollback_strategy": "Manual DROP TABLE if rollback is required after creation.",
         }
     ]
 

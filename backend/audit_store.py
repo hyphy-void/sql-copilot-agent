@@ -25,8 +25,14 @@ class AuditStore:
         approval_token: str,
         has_blocking_risk: bool,
         risk_summary: str,
+        risk_level: str,
         notes: List[str],
         operations: List[Dict[str, Any]],
+        normalized_intent: str,
+        impact_summary: str,
+        preflight_checks: List[Dict[str, Any]],
+        actor_id: str | None = None,
+        session_id: str | None = None,
     ) -> Dict[str, Any]:
         now = _utc_now()
         with self._lock, self._connect() as conn:
@@ -42,9 +48,15 @@ class AuditStore:
                     approval_token,
                     has_blocking_risk,
                     risk_summary,
+                    risk_level,
                     notes_json,
                     operations_json,
                     execution_results_json,
+                    normalized_intent,
+                    impact_summary,
+                    preflight_checks_json,
+                    actor_id,
+                    session_id,
                     rejection_reason,
                     error_message,
                     approver,
@@ -54,7 +66,7 @@ class AuditStore:
                     rejected_at,
                     executed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     proposal_id,
@@ -66,9 +78,15 @@ class AuditStore:
                     approval_token,
                     int(has_blocking_risk),
                     risk_summary,
+                    risk_level,
                     json.dumps(notes, ensure_ascii=False),
                     json.dumps(operations, ensure_ascii=False),
                     json.dumps([], ensure_ascii=False),
+                    normalized_intent,
+                    impact_summary,
+                    json.dumps(preflight_checks, ensure_ascii=False),
+                    actor_id,
+                    session_id,
                     None,
                     None,
                     None,
@@ -161,9 +179,15 @@ class AuditStore:
                     approval_token TEXT NOT NULL,
                     has_blocking_risk INTEGER NOT NULL,
                     risk_summary TEXT NOT NULL,
+                    risk_level TEXT NOT NULL DEFAULT 'safe',
                     notes_json TEXT NOT NULL,
                     operations_json TEXT NOT NULL,
                     execution_results_json TEXT NOT NULL,
+                    normalized_intent TEXT NOT NULL DEFAULT '',
+                    impact_summary TEXT NOT NULL DEFAULT '',
+                    preflight_checks_json TEXT NOT NULL DEFAULT '[]',
+                    actor_id TEXT,
+                    session_id TEXT,
                     rejection_reason TEXT,
                     error_message TEXT,
                     approver TEXT,
@@ -175,7 +199,22 @@ class AuditStore:
                 )
                 """
             )
+            self._migrate_schema(conn)
             conn.commit()
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        columns = _existing_columns(conn)
+        migrations = {
+            "risk_level": "ALTER TABLE ddl_proposals ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'safe'",
+            "normalized_intent": "ALTER TABLE ddl_proposals ADD COLUMN normalized_intent TEXT NOT NULL DEFAULT ''",
+            "impact_summary": "ALTER TABLE ddl_proposals ADD COLUMN impact_summary TEXT NOT NULL DEFAULT ''",
+            "preflight_checks_json": "ALTER TABLE ddl_proposals ADD COLUMN preflight_checks_json TEXT NOT NULL DEFAULT '[]'",
+            "actor_id": "ALTER TABLE ddl_proposals ADD COLUMN actor_id TEXT",
+            "session_id": "ALTER TABLE ddl_proposals ADD COLUMN session_id TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                conn.execute(statement)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -189,8 +228,14 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     payload["notes"] = json.loads(payload.pop("notes_json") or "[]")
     payload["operations"] = json.loads(payload.pop("operations_json") or "[]")
     payload["execution_results"] = json.loads(payload.pop("execution_results_json") or "[]")
+    payload["preflight_checks"] = json.loads(payload.pop("preflight_checks_json", "[]") or "[]")
     return payload
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _existing_columns(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("PRAGMA table_info(ddl_proposals)").fetchall()
+    return {str(row[1]) for row in rows}

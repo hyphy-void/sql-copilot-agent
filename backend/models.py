@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class HealthResponse(BaseModel):
     status: str
     llm_enabled: bool
+    safe_mode: str | None = None
 
 
 class SchemaTablesResponse(BaseModel):
@@ -36,20 +37,36 @@ class AutocompleteRequest(BaseModel):
     use_llm: bool = True
 
 
+AutocompleteMode = Literal["rule_only", "hybrid", "recovery", "join_infer"]
+
+
+class SuggestionItem(BaseModel):
+    text: str
+    source: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    reason_code: str
+    reason: str
+
+
 class AutocompleteResponse(BaseModel):
     suggestions: List[str]
-    mode: Literal["rule_only", "hybrid"]
+    mode: AutocompleteMode
+    strategy: AutocompleteMode
+    items: List[SuggestionItem] = Field(default_factory=list)
     debug: Optional[Dict[str, Any]] = None
 
 
-DDLStatus = Literal["PENDING", "APPROVED", "REJECTED", "EXECUTED", "FAILED"]
-DDLRiskLevel = Literal["safe", "blocked"]
+DDLStatus = Literal["PENDING", "APPROVED", "REJECTED", "EXECUTED", "FAILED", "PARTIAL"]
+DDLRiskLevel = Literal["safe", "warning", "blocked"]
 StatementStatus = Literal["success", "error"]
 
 
 class ChatPlanRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     use_llm: bool = True
+    actor_id: Optional[str] = None
+    session_id: Optional[str] = None
+    source: Optional[str] = None
 
 
 class DDLOperation(BaseModel):
@@ -58,6 +75,10 @@ class DDLOperation(BaseModel):
     allowed: bool
     risk_level: DDLRiskLevel
     reason: str
+    impact_summary: str | None = None
+    preflight_checks: List[Dict[str, Any]] = Field(default_factory=list)
+    idempotency: str | None = None
+    rollback_strategy: str | None = None
 
 
 class ExecutionResult(BaseModel):
@@ -77,9 +98,15 @@ class DDLProposal(BaseModel):
     approval_token: str
     has_blocking_risk: bool
     risk_summary: str
+    risk_level: DDLRiskLevel
     notes: List[str]
     operations: List[DDLOperation]
     execution_results: List[ExecutionResult]
+    normalized_intent: str = ""
+    impact_summary: str = ""
+    preflight_checks: List[Dict[str, Any]] = Field(default_factory=list)
+    actor_id: Optional[str] = None
+    session_id: Optional[str] = None
     rejection_reason: Optional[str] = None
     error_message: Optional[str] = None
     approver: Optional[str] = None

@@ -45,3 +45,34 @@ def test_where_with_trailing_space_prefers_columns(tmp_path: Path):
     result = engine.suggest_rules(sql, len(sql))
     assert "orders.id" in result.suggestions
     assert "orders.order_date" in result.suggestions
+
+
+def test_join_inference_suggests_related_table(tmp_path: Path):
+    engine = make_engine(tmp_path)
+    sql = "SELECT * FROM orders JOIN us"
+
+    result = engine.suggest_rules(sql, len(sql), max_suggestions=20)
+
+    assert any(item.source == "join_infer" for item in result.items)
+    assert any("JOIN users ON orders.user_id = users.id" == item.text for item in result.items)
+    assert result.strategy == "join_infer"
+
+
+def test_recovery_mode_returns_fixup_suggestion(tmp_path: Path):
+    engine = make_engine(tmp_path)
+    sql = "SELECT ("
+
+    result = engine.suggest_rules(sql, len(sql), max_suggestions=20)
+
+    assert result.strategy == "recovery"
+    assert any(item.source == "recovery" for item in result.items)
+
+
+def test_group_by_ranks_columns(tmp_path: Path):
+    engine = make_engine(tmp_path)
+    sql = "SELECT orders.user_id, COUNT(*) FROM orders GROUP BY "
+
+    result = engine.suggest_rules(sql, len(sql))
+
+    assert result.context.clause == "group_by"
+    assert result.items[0].reason_code in {"group_by", "select_column"}

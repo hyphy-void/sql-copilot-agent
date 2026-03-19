@@ -13,6 +13,26 @@ class FakeLLMProvider(BaseLLMProvider):
         return ["order_date >= date('now', '-7 day')", "price > 100"]
 
 
+class NoisyLLMProvider(BaseLLMProvider):
+    def generate_completion(self, sql_prefix, schema_snapshot, context):
+        return [
+            "name, u.email, u.city",
+            "COUNT(o.id) AS order_count",
+            "u.created_at >= CURRENT_DATE - INTERVAL '7 days'",
+            "o.user_id = u.id",
+        ]
+
+
+class RepairLLMProvider(BaseLLMProvider):
+    def generate_completion(self, sql_prefix, schema_snapshot, context):
+        if "repair" in context:
+            return [
+                "u.created_at >= '2023-01-01'",
+                "u.segment = 'premium'",
+            ]
+        return ["u.id"]
+
+
 def make_components(tmp_path: Path, provider):
     db_path = tmp_path / "graph.db"
     manager = SchemaManager(db_path)
@@ -30,6 +50,7 @@ def test_graph_returns_hybrid_mode_with_llm(tmp_path: Path):
     result = graph.run(sql=sql, cursor=len(sql), use_llm=True, max_suggestions=100)
 
     assert result["mode"] == "hybrid"
+    assert result["strategy"] == "hybrid"
     assert result["suggestions"][0] in {
         "order_date >= date('now', '-7 day')",
         "price > 100",
@@ -40,6 +61,7 @@ def test_graph_returns_hybrid_mode_with_llm(tmp_path: Path):
     assert "ui_context_label" in result["debug"]
     assert "suggestion_reasons" in result["debug"]
     assert result["debug"]["suggestion_reasons"]["order_date >= date('now', '-7 day')"]
+    assert result["items"][0]["confidence"] > 0
 
 
 def test_graph_degrades_to_rule_mode_without_llm(tmp_path: Path):
@@ -51,3 +73,38 @@ def test_graph_degrades_to_rule_mode_without_llm(tmp_path: Path):
     assert result["mode"] == "rule_only"
     assert result["suggestions"]
     assert "fallback_reason" in result["debug"]
+
+
+def test_graph_returns_join_infer_strategy(tmp_path: Path):
+    graph = make_components(tmp_path, provider=None)
+    sql = "SELECT * FROM orders JOIN us"
+
+    result = graph.run(sql=sql, cursor=len(sql), use_llm=False, max_suggestions=20)
+
+    assert result["strategy"] == "join_infer"
+    assert any(item["source"] == "join_infer" for item in result["items"])
+
+
+def test_graph_filters_invalid_llm_where_suggestions(tmp_path: Path):
+    graph = make_components(tmp_path, NoisyLLMProvider())
+
+    sql = "SELECT u. FROM users u WHERE "
+    result = graph.run(sql=sql, cursor=len(sql), use_llm=True, max_suggestions=50)
+
+    assert "name, u.email, u.city" not in result["suggestions"]
+    assert "COUNT(o.id) AS order_count" not in result["suggestions"]
+    assert "o.user_id = u.id" not in result["suggestions"]
+    assert "u.created_at >= CURRENT_DATE - INTERVAL '7 days'" in result["suggestions"]
+
+
+def test_graph_prefers_repair_aware_llm_for_malformed_sql(tmp_path: Path):
+    graph = make_components(tmp_path, RepairLLMProvider())
+
+    sql = "SELECT u.\nFROM users uname, email, city\nWHERE u.created_at AND uname.created_atname.created_at"
+    result = graph.run(sql=sql, cursor=len(sql), use_llm=True, max_suggestions=20)
+
+    assert result["strategy"] == "hybrid"
+    assert result["items"][0]["source"] == "llm"
+    assert result["items"][0]["reason_code"] == "semantic_repair"
+    assert result["debug"]["repair_mode"] is True
+    assert "u.created_at >= '2023-01-01'" in result["suggestions"]

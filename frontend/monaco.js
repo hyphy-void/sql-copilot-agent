@@ -4,12 +4,24 @@ const MAX_SUGGESTIONS = 10;
 let editor;
 let activeSuggestions = [];
 let activeSuggestionReasons = {};
+let activeSuggestionContext = null;
 let inlinePreview = null;
 let refreshTimer = null;
 let requestSeq = 0;
 let activeProposal = null;
 let activeProposalSummary = null;
 let lastRetryAction = null;
+let activeSuggestionStrategy = "rule_only";
+let schemaOverviewItems = [];
+let schemaColumnCache = {};
+let schemaExpandedTables = new Set();
+let schemaLoadingTables = new Set();
+let schemaLoadErrors = {};
+
+function getUseLlmEnabled() {
+  const useLlmInput = document.getElementById("use-llm");
+  return !!useLlmInput?.checked;
+}
 
 function setStatus(message, level = "info", retryAction = null) {
   const statusEl = document.getElementById("status");
@@ -124,6 +136,16 @@ function computeProposalSummary(proposal) {
   const operations = proposal?.operations || [];
   const allowedCount = operations.filter((item) => item.allowed).length;
   const blockedCount = operations.length - allowedCount;
+  const failedPreflightChecks = getFailedPreflightChecks(proposal);
+
+  if (failedPreflightChecks.length > 0) {
+    return {
+      allowed_count: allowedCount,
+      blocked_count: blockedCount,
+      next_action_hint:
+        "存在失败的预检查项，请先处理后再审批执行 / Failed preflight checks detected. Resolve them before execution.",
+    };
+  }
 
   if (blockedCount > 0) {
     return {
@@ -142,6 +164,70 @@ function computeProposalSummary(proposal) {
   };
 }
 
+function getProposalPreflightChecks(proposal) {
+  return Array.isArray(proposal?.preflight_checks) ? proposal.preflight_checks : [];
+}
+
+function getFailedPreflightChecks(proposal) {
+  return getProposalPreflightChecks(proposal).filter(
+    (item) => String(item?.status || "").toLowerCase() === "fail"
+  );
+}
+
+function hasBlockingApprovalIssue(proposal) {
+  return !!proposal && (!!proposal.has_blocking_risk || getFailedPreflightChecks(proposal).length > 0);
+}
+
+function buildProposalNotes(proposal) {
+  const merged = [];
+  const seen = new Set();
+
+  const pushNote = (text) => {
+    const value = String(text || "").trim();
+    if (!value || seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+    merged.push(value);
+  };
+
+  (proposal?.notes || []).forEach(pushNote);
+
+  if (proposal?.impact_summary) {
+    pushNote(`Impact: ${proposal.impact_summary}`);
+  }
+
+  const preflightChecks = getProposalPreflightChecks(proposal).filter((item) =>
+    ["fail", "warning", "review"].includes(String(item?.status || "").toLowerCase())
+  );
+  preflightChecks.forEach((item) => {
+    pushNote(
+      `Preflight ${String(item?.name || "check")}: [${String(item?.status || "").toUpperCase()}] ${String(
+        item?.detail || ""
+      ).trim()}`
+    );
+  });
+
+  return merged;
+}
+
+function resolvePlanSummary(summary, proposal) {
+  const resolved = summary || computeProposalSummary(proposal);
+  if (!proposal || !resolved) {
+    return resolved;
+  }
+
+  if (getFailedPreflightChecks(proposal).length > 0) {
+    return {
+      ...resolved,
+      next_action_hint:
+        "存在失败的预检查项，请先处理后再审批执行 / Failed preflight checks detected. Resolve them before execution.",
+    };
+  }
+
+  return resolved;
+}
+
 function renderPlanSummary(summary, proposal) {
   const allowedEl = document.getElementById("summary-allowed");
   const blockedEl = document.getElementById("summary-blocked");
@@ -157,7 +243,7 @@ function renderPlanSummary(summary, proposal) {
     return;
   }
 
-  const resolved = summary || computeProposalSummary(proposal);
+  const resolved = resolvePlanSummary(summary, proposal);
   allowedEl.textContent = String(resolved.allowed_count || 0);
   blockedEl.textContent = String(resolved.blocked_count || 0);
   nextEl.textContent =
@@ -181,11 +267,11 @@ function updateApproveAvailability() {
   }
 
   const isPending = activeProposal.status === "PENDING";
-  const hasBlockingRisk = !!activeProposal.has_blocking_risk;
+  const approvalBlocked = hasBlockingApprovalIssue(activeProposal);
   const confirmed = (confirmInput.value || "").trim().toUpperCase() === "APPROVE";
 
-  confirmInput.disabled = !isPending || hasBlockingRisk;
-  approveBtn.disabled = !isPending || hasBlockingRisk || !confirmed;
+  confirmInput.disabled = !isPending || approvalBlocked;
+  approveBtn.disabled = !isPending || approvalBlocked || !confirmed;
   rejectBtn.disabled = !isPending;
 }
 
@@ -215,13 +301,13 @@ function renderProposal(proposal, summary = null) {
     return;
   }
 
-  const blocking = !!proposal.has_blocking_risk;
+  const blocking = hasBlockingApprovalIssue(proposal);
   meta.textContent = `#${proposal.proposal_id} | ${proposal.status} | ${proposal.backend.toUpperCase()} (${proposal.source})`;
   risk.textContent = blocking ? "BLOCKED 已阻断" : "SAFE 安全";
   risk.className = `risk-badge ${blocking ? "blocked" : "safe"}`;
 
   notesEl.innerHTML = "";
-  const notes = proposal.notes || [];
+  const notes = buildProposalNotes(proposal);
   notes.forEach((note) => {
     const item = document.createElement("li");
     item.textContent = note;
@@ -290,8 +376,21 @@ async function fetchSchemaOverview() {
   return fetchJson(`${API_BASE}/schema/overview`);
 }
 
+async function fetchSchemaColumns(table) {
+  return fetchJson(`${API_BASE}/schema/columns/${encodeURIComponent(table)}`);
+}
+
 function normalizeSource(value) {
-  return value === "llm" ? "llm" : "rule";
+  if (value === "llm") {
+    return "llm";
+  }
+  if (value === "join_infer") {
+    return "join_infer";
+  }
+  if (value === "recovery") {
+    return "recovery";
+  }
+  return "rule";
 }
 
 function prioritizeLlm(items) {
@@ -299,21 +398,48 @@ function prioritizeLlm(items) {
     return [];
   }
 
-  const llmItems = [];
-  const ruleItems = [];
+  const priorities = {
+    llm: 4,
+    join_infer: 3,
+    recovery: 2,
+    rule: 1,
+  };
 
-  items.forEach((item) => {
-    if (item.source === "llm") {
-      llmItems.push(item);
-    } else {
-      ruleItems.push(item);
+  return [...items].sort((left, right) => {
+    const leftPriority = priorities[left.source] || 0;
+    const rightPriority = priorities[right.source] || 0;
+    if (leftPriority !== rightPriority) {
+      return rightPriority - leftPriority;
     }
+    return (right.confidence || 0) - (left.confidence || 0);
   });
+}
 
-  return [...llmItems, ...ruleItems];
+function formatConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "--";
+  }
+  return `${Math.round(numeric * 100)}%`;
+}
+
+function humanizeReasonCode(reasonCode) {
+  const code = String(reasonCode || "").trim();
+  return code ? code.replaceAll("_", " ") : "context match";
+}
+
+function formatStrategyLabel(strategy) {
+  const labels = {
+    rule_only: "Rule Only",
+    hybrid: "Hybrid",
+    recovery: "Recovery",
+    join_infer: "Join Infer",
+  };
+  return labels[strategy] || strategy || "Rule Only";
 }
 
 function normalizeSuggestionPayload(payload, defaultSource = "rule") {
+  const structuredItems = Array.isArray(payload?.items) ? payload.items : [];
   const suggestions = (payload?.suggestions || []).slice(0, MAX_SUGGESTIONS);
   const sourceMap = payload?.debug?.suggestion_sources || {};
   const ruleSet = new Set(
@@ -322,25 +448,48 @@ function normalizeSuggestionPayload(payload, defaultSource = "rule") {
   const llmSet = new Set(
     (payload?.debug?.llm_suggestions || []).map((item) => item.toLowerCase())
   );
-
-  const items = suggestions.map((text) => {
-    let source = defaultSource;
-
-    if (sourceMap[text]) {
-      source = normalizeSource(sourceMap[text]);
-    } else {
-      const key = text.toLowerCase();
-      if (llmSet.has(key) && !ruleSet.has(key)) {
-        source = "llm";
-      } else if (ruleSet.has(key)) {
-        source = "rule";
-      }
-    }
-
-    return { text, source };
-  });
-
   const reasonMap = payload?.debug?.suggestion_reasons || {};
+
+  let items = structuredItems
+    .slice(0, MAX_SUGGESTIONS)
+    .map((item) => ({
+      text: item.text,
+      source: normalizeSource(item.source || defaultSource),
+      confidence: Number(item.confidence) || 0,
+      reasonCode: item.reason_code || "context_match",
+      reason:
+        item.reason ||
+        reasonMap[item.text] ||
+        "基于当前上下文推荐 / Suggested from current context.",
+    }));
+
+  if (items.length === 0) {
+    items = suggestions.map((text) => {
+      let source = defaultSource;
+
+      if (sourceMap[text]) {
+        source = normalizeSource(sourceMap[text]);
+      } else {
+        const key = text.toLowerCase();
+        if (llmSet.has(key) && !ruleSet.has(key)) {
+          source = "llm";
+        } else if (ruleSet.has(key)) {
+          source = "rule";
+        }
+      }
+
+      return {
+        text,
+        source,
+        confidence: source === "llm" ? 0.7 : 0.5,
+        reasonCode: source === "llm" ? "semantic_prediction" : "context_match",
+        reason:
+          reasonMap[text] ||
+          "基于当前上下文推荐 / Suggested from current context.",
+      };
+    });
+  }
+
   return {
     items: prioritizeLlm(items),
     reasonMap,
@@ -349,13 +498,15 @@ function normalizeSuggestionPayload(payload, defaultSource = "rule") {
       "通用补全 / General SQL suggestions",
     fallbackReason: payload?.debug?.fallback_reason || "",
     mode: payload?.mode || "rule_only",
+    strategy: payload?.strategy || payload?.mode || "rule_only",
+    strategyLabel: formatStrategyLabel(payload?.strategy || payload?.mode || "rule_only"),
   };
 }
 
-function updateContextLabel(label) {
+function updateContextLabel(label, strategyLabel = "Rule Only") {
   const contextLabelEl = document.getElementById("context-label");
   if (contextLabelEl) {
-    contextLabelEl.textContent = label || "通用补全 / General SQL suggestions";
+    contextLabelEl.textContent = `${label || "通用补全 / General SQL suggestions"} | Strategy: ${strategyLabel}`;
   }
 }
 
@@ -398,12 +549,17 @@ function renderSuggestionList(items, reasonMap = {}) {
     source.className = `source-badge ${suggestion.source}`;
     source.textContent = suggestion.source.toUpperCase();
 
+    const confidence = document.createElement("span");
+    confidence.className = "confidence-badge";
+    confidence.textContent = formatConfidence(suggestion.confidence);
+
     left.appendChild(text);
     left.appendChild(source);
+    left.appendChild(confidence);
 
     const shortcut = document.createElement("span");
     shortcut.className = "shortcut-key";
-    shortcut.textContent = `Alt+${index + 1}`;
+    shortcut.textContent = `Opt+Shift+${index + 1}`;
 
     head.appendChild(left);
     head.appendChild(shortcut);
@@ -411,11 +567,19 @@ function renderSuggestionList(items, reasonMap = {}) {
     const reason = document.createElement("div");
     reason.className = "suggestion-reason";
     reason.textContent =
+      suggestion.reason ||
       activeSuggestionReasons[suggestion.text] ||
       "基于当前上下文推荐 / Suggested from current context.";
 
+    const meta = document.createElement("div");
+    meta.className = "suggestion-meta";
+    meta.textContent = `reason_code: ${humanizeReasonCode(
+      suggestion.reasonCode
+    )} | strategy: ${formatStrategyLabel(activeSuggestionStrategy)}`;
+
     item.appendChild(head);
     item.appendChild(reason);
+    item.appendChild(meta);
 
     item.addEventListener("click", () => {
       insertSuggestionByIndex(index);
@@ -427,52 +591,265 @@ function renderSuggestionList(items, reasonMap = {}) {
   listEl.scrollTop = 0;
 }
 
-function renderSchemaOverview(tables) {
-  const overviewEl = document.getElementById("schema-overview");
-  if (!overviewEl) {
-    return;
+function formatSchemaTableCount(count) {
+  return `${count} 张表 / ${count} tables`;
+}
+
+function formatSchemaKeyPreview(keyColumns) {
+  const items = (keyColumns || []).filter(Boolean).slice(0, 3);
+  return items.length > 0 ? items.join(", ") : "No highlighted columns";
+}
+
+function formatColumnDefault(value) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return "-";
+  }
+  return String(value);
+}
+
+function createSchemaPill(text, kind = "") {
+  const pill = document.createElement("span");
+  pill.className = kind ? `schema-pill ${kind}` : "schema-pill";
+  pill.textContent = text;
+  return pill;
+}
+
+function renderSchemaColumns(columns) {
+  const list = document.createElement("ul");
+  list.className = "schema-columns";
+
+  if (!columns || columns.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "schema-state";
+    empty.textContent = "该表暂无列信息 / No column metadata available for this table.";
+    return empty;
   }
 
-  overviewEl.innerHTML = "";
-
-  if (!tables || tables.length === 0) {
-    const emptyItem = document.createElement("li");
-    emptyItem.textContent = "暂无 Schema 信息 / No schema metadata";
-    overviewEl.appendChild(emptyItem);
-    return;
-  }
-
-  tables.slice(0, 8).forEach((tableInfo) => {
+  columns.forEach((column) => {
     const item = document.createElement("li");
+    item.className = "schema-column-item";
 
-    const title = document.createElement("div");
-    title.className = "schema-title";
-    title.textContent = tableInfo.table;
+    const top = document.createElement("div");
+    top.className = "schema-column-top";
+
+    const name = document.createElement("div");
+    name.className = "schema-column-name";
+    name.textContent = String(column?.name || "-");
+
+    const type = document.createElement("div");
+    type.className = "schema-column-type";
+    type.textContent = String(column?.type || "UNKNOWN");
+
+    top.appendChild(name);
+    top.appendChild(type);
 
     const meta = document.createElement("div");
-    meta.className = "schema-meta";
-    const keyColumns = (tableInfo.key_columns || []).join(", ") || "-";
-    meta.textContent = `${tableInfo.column_count} cols | ${keyColumns}`;
+    meta.className = "schema-column-meta";
+    if (column?.pk) {
+      meta.appendChild(createSchemaPill("PK", "key"));
+    }
+    meta.appendChild(createSchemaPill(column?.notnull ? "NOT NULL" : "NULLABLE"));
 
-    item.appendChild(title);
+    const defaultValue = document.createElement("div");
+    defaultValue.className = "schema-default";
+    defaultValue.textContent = `DEFAULT: ${formatColumnDefault(column?.default)}`;
+
+    item.appendChild(top);
     item.appendChild(meta);
-    overviewEl.appendChild(item);
+    item.appendChild(defaultValue);
+    list.appendChild(item);
   });
+
+  return list;
+}
+
+function renderSchemaRail() {
+  const listEl = document.getElementById("schema-rail-list");
+  const countEl = document.getElementById("schema-table-count");
+  if (!listEl || !countEl) {
+    return;
+  }
+
+  countEl.textContent = formatSchemaTableCount(schemaOverviewItems.length);
+  listEl.innerHTML = "";
+
+  if (!schemaOverviewItems || schemaOverviewItems.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "schema-empty";
+    empty.textContent = "暂无 Schema 信息 / No schema metadata available yet.";
+    listEl.appendChild(empty);
+    return;
+  }
+
+  schemaOverviewItems.forEach((tableInfo) => {
+    const tableName = String(tableInfo?.table || "");
+    const details = document.createElement("details");
+    details.className = "schema-card";
+    details.open = schemaExpandedTables.has(tableName);
+
+    const summary = document.createElement("summary");
+
+    const head = document.createElement("div");
+    head.className = "schema-card-head";
+
+    const left = document.createElement("div");
+    left.className = "schema-card-left";
+
+    const title = document.createElement("div");
+    title.className = "schema-table-name";
+    title.textContent = tableName;
+
+    const badges = document.createElement("div");
+    badges.className = "schema-table-badges";
+    badges.appendChild(createSchemaPill(`${Number(tableInfo?.column_count || 0)} cols`));
+
+    (tableInfo?.key_columns || [])
+      .filter(Boolean)
+      .slice(0, 3)
+      .forEach((columnName) => {
+        badges.appendChild(createSchemaPill(String(columnName), "key"));
+      });
+
+    left.appendChild(title);
+    left.appendChild(badges);
+
+    const preview = document.createElement("div");
+    preview.className = "schema-preview";
+    preview.textContent = formatSchemaKeyPreview(tableInfo?.key_columns || []);
+
+    head.appendChild(left);
+    head.appendChild(preview);
+
+    summary.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "schema-card-body";
+
+    if (!details.open) {
+      const hint = document.createElement("div");
+      hint.className = "schema-state";
+      hint.textContent = "展开后按需加载列信息 / Expand to load column details on demand.";
+      body.appendChild(hint);
+    } else if (schemaLoadingTables.has(tableName)) {
+      const loading = document.createElement("div");
+      loading.className = "schema-state";
+      loading.textContent = "正在加载列信息... / Loading column metadata...";
+      body.appendChild(loading);
+    } else if (schemaLoadErrors[tableName]) {
+      const error = document.createElement("div");
+      error.className = "schema-state error";
+      error.textContent = `加载失败：${schemaLoadErrors[tableName]}`;
+
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "ghost-btn compact-btn";
+      retry.textContent = "重试 Retry";
+      retry.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        ensureSchemaColumnsLoaded(tableName, { force: true, showStatus: true });
+      });
+
+      body.appendChild(error);
+      body.appendChild(retry);
+    } else if (schemaColumnCache[tableName]) {
+      body.appendChild(renderSchemaColumns(schemaColumnCache[tableName]));
+    } else {
+      const placeholder = document.createElement("div");
+      placeholder.className = "schema-state";
+      placeholder.textContent = "准备加载列信息... / Preparing column metadata...";
+      body.appendChild(placeholder);
+    }
+
+    details.appendChild(summary);
+    details.appendChild(body);
+    details.addEventListener("toggle", () => {
+      if (details.open) {
+        schemaExpandedTables.add(tableName);
+        ensureSchemaColumnsLoaded(tableName);
+      } else {
+        schemaExpandedTables.delete(tableName);
+      }
+    });
+
+    listEl.appendChild(details);
+  });
+}
+
+async function ensureSchemaColumnsLoaded(table, { force = false, showStatus = false } = {}) {
+  const tableName = String(table || "").trim();
+  if (!tableName) {
+    return;
+  }
+
+  if (!force && schemaColumnCache[tableName]) {
+    return;
+  }
+
+  if (schemaLoadingTables.has(tableName)) {
+    return;
+  }
+
+  delete schemaLoadErrors[tableName];
+  schemaLoadingTables.add(tableName);
+  renderSchemaRail();
+
+  try {
+    const payload = await fetchSchemaColumns(tableName);
+    schemaColumnCache[tableName] = Array.isArray(payload?.columns) ? payload.columns : [];
+    delete schemaLoadErrors[tableName];
+  } catch (error) {
+    schemaLoadErrors[tableName] = error.message;
+    if (showStatus) {
+      setStatus(
+        `表 ${tableName} 列信息加载失败：${error.message}`,
+        "error",
+        () => ensureSchemaColumnsLoaded(tableName, { force: true, showStatus: true })
+      );
+    }
+  } finally {
+    schemaLoadingTables.delete(tableName);
+    renderSchemaRail();
+  }
 }
 
 async function refreshSchemaOverview(showStatus = false) {
   try {
     const payload = await fetchSchemaOverview();
-    renderSchemaOverview(payload.tables || []);
+    schemaOverviewItems = Array.isArray(payload?.tables) ? payload.tables : [];
+    const availableTables = new Set(schemaOverviewItems.map((item) => String(item?.table || "")));
+    schemaExpandedTables = new Set(
+      [...schemaExpandedTables].filter((tableName) => availableTables.has(tableName))
+    );
+    schemaColumnCache = {};
+    schemaLoadingTables = new Set();
+    schemaLoadErrors = {};
+    renderSchemaRail();
+    schemaExpandedTables.forEach((tableName) => {
+      void ensureSchemaColumnsLoaded(tableName);
+    });
     if (showStatus) {
-      setStatus("Schema 参考已更新 / Schema overview refreshed.", "success");
+      setStatus("Schema 结构已更新 / Schema explorer refreshed.", "success");
     }
   } catch (error) {
     setStatus(
       `Schema 加载失败：${error.message}`,
       "error",
-      () => refreshSchemaOverview(true)
+      () => handleSchemaRefresh()
     );
+  }
+}
+
+async function handleSchemaRefresh() {
+  if (getIsButtonLoading("schema-refresh")) {
+    return;
+  }
+
+  setButtonLoading("schema-refresh", true, "刷新中 Refreshing...");
+  try {
+    await refreshSchemaOverview(true);
+  } finally {
+    setButtonLoading("schema-refresh", false);
   }
 }
 
@@ -507,25 +884,152 @@ function getActiveContext() {
     return null;
   }
 
-  const useLlmInput = document.getElementById("use-llm");
-
   return {
     model,
     position,
     sql: model.getValue(),
     cursor: model.getOffsetAt(position),
-    useLLM: !!useLlmInput?.checked,
+    useLLM: getUseLlmEnabled(),
   };
 }
 
 function isSameContext(left, right) {
-  return !!left && !!right && left.sql === right.sql && left.cursor === right.cursor;
+  return (
+    !!left &&
+    !!right &&
+    left.sql === right.sql &&
+    left.cursor === right.cursor &&
+    !!left.useLLM === !!right.useLLM
+  );
 }
 
 function extractTokenPrefix(sql, cursor) {
   const prefix = sql.slice(0, cursor);
   const match = prefix.match(/([A-Za-z_][A-Za-z0-9_.]*)$/);
   return match ? match[1] : "";
+}
+
+function inferClauseForGhost(sql, cursor) {
+  const prefix = sql.slice(0, cursor).toUpperCase();
+  const patterns = [
+    ["HAVING", /\bHAVING\b/g],
+    ["ORDER BY", /\bORDER\s+BY\b/g],
+    ["GROUP BY", /\bGROUP\s+BY\b/g],
+    ["ON", /\bON\b/g],
+    ["WHERE", /\bWHERE\b/g],
+    ["JOIN", /\bJOIN\b/g],
+    ["FROM", /\bFROM\b/g],
+    ["SELECT", /\bSELECT\b/g],
+  ];
+
+  let bestClause = "UNKNOWN";
+  let bestIndex = -1;
+  for (const [clause, pattern] of patterns) {
+    const matches = [...prefix.matchAll(pattern)];
+    if (!matches.length) {
+      continue;
+    }
+    const index = matches[matches.length - 1].index ?? -1;
+    if (index > bestIndex) {
+      bestClause = clause;
+      bestIndex = index;
+    }
+  }
+  return bestClause;
+}
+
+function isConditionSuggestion(item) {
+  const text = String(item?.text || "");
+  const reasonCode = String(item?.reasonCode || "");
+  return (
+    /(=|!=|<>|>=|<=|>|<|\blike\b|\bin\b|\bis\b|\bbetween\b)/i.test(text) ||
+    /(semantic_prediction|where|having|on)/i.test(reasonCode)
+  );
+}
+
+function isFromJoinSuggestion(item) {
+  const text = String(item?.text || "").trim();
+  const source = String(item?.source || "");
+  const reasonCode = String(item?.reasonCode || "");
+  return (
+    source === "join_infer" ||
+    /^JOIN\b/i.test(text) ||
+    (/^[A-Za-z_][A-Za-z0-9_]*$/.test(text) && /(table|join)/i.test(reasonCode))
+  );
+}
+
+function isSelectSuggestion(item) {
+  const text = String(item?.text || "").trim();
+  const reasonCode = String(item?.reasonCode || "");
+  return (
+    text.includes(".") ||
+    /\b(count|sum|avg|min|max)\(/i.test(text) ||
+    /(select|column|group_by|order_by)/i.test(reasonCode)
+  );
+}
+
+function isRepairSuggestion(item) {
+  return /semantic[_\s]?repair/i.test(String(item?.reasonCode || ""));
+}
+
+function pickGhostSuggestion(context, items) {
+  if (!context || !items?.length) {
+    return null;
+  }
+
+  const llmItems = items.filter((item) => item.source === "llm");
+  const repairItems = llmItems.filter(isRepairSuggestion);
+  if (repairItems.length > 0) {
+    return repairItems[0];
+  }
+
+  const tokenPrefix = extractTokenPrefix(context.sql, context.cursor);
+  if (tokenPrefix && !isClauseKeyword(tokenPrefix)) {
+    return llmItems[0] || items[0];
+  }
+
+  const clause = inferClauseForGhost(context.sql, context.cursor);
+  if (clause === "WHERE" || clause === "ON" || clause === "HAVING") {
+    return llmItems.find(isConditionSuggestion) || items.find(isConditionSuggestion) || null;
+  }
+  if (clause === "FROM" || clause === "JOIN") {
+    return llmItems.find(isFromJoinSuggestion) || items.find(isFromJoinSuggestion) || null;
+  }
+  if (clause === "SELECT" || clause === "GROUP BY" || clause === "ORDER BY") {
+    return llmItems.find(isSelectSuggestion) || items.find(isSelectSuggestion) || null;
+  }
+
+  return llmItems[0] || items[0] || null;
+}
+
+function isClauseKeyword(token) {
+  const keywords = new Set([
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "JOIN",
+    "ON",
+    "HAVING",
+    "GROUP",
+    "ORDER",
+    "BY",
+  ]);
+  return keywords.has(String(token || "").toUpperCase());
+}
+
+function shouldAllowClauseGhostPreview(sql, cursor, tokenPrefix) {
+  if (!tokenPrefix || !isClauseKeyword(tokenPrefix)) {
+    return false;
+  }
+
+  const nextChar = sql[cursor] || "";
+  return nextChar === "" || /\s/.test(nextChar);
+}
+
+function buildClauseGhostText(sql, cursor, suggestionText) {
+  const prevChar = sql[cursor - 1] || "";
+  const needsLeadingSpace = prevChar && !/\s|\(|,/.test(prevChar);
+  return `${needsLeadingSpace ? " " : ""}${suggestionText}`;
 }
 
 function getReplacementRange(model, cursor, position, suggestion) {
@@ -551,6 +1055,17 @@ function getReplacementRange(model, cursor, position, suggestion) {
   );
 }
 
+function getSuggestionReplacementRange(context, suggestionItem) {
+  const suggestionText = String(suggestionItem?.text || "");
+  const tokenPrefix = extractTokenPrefix(context.sql, context.cursor);
+
+  if (isRepairSuggestion(suggestionItem) && tokenPrefix && !isClauseKeyword(tokenPrefix)) {
+    return getReplacementRange(context.model, context.cursor, context.position, tokenPrefix);
+  }
+
+  return getReplacementRange(context.model, context.cursor, context.position, suggestionText);
+}
+
 function clearInlinePreview() {
   inlinePreview = null;
   if (editor) {
@@ -558,36 +1073,65 @@ function clearInlinePreview() {
   }
 }
 
-function updateInlinePreview(context, topSuggestionText) {
-  if (!context || !topSuggestionText) {
-    clearInlinePreview();
-    return;
+function buildInlinePreview(context, suggestionItem) {
+  const suggestionText = String(suggestionItem?.text || "");
+  if (!context || !suggestionText) {
+    return null;
   }
 
-  const range = getReplacementRange(
-    context.model,
-    context.cursor,
-    context.position,
-    topSuggestionText
-  );
-  const currentRangeText = context.model.getValueInRange(range);
+  const tokenPrefix = extractTokenPrefix(context.sql, context.cursor);
+  const isRepair = isRepairSuggestion(suggestionItem);
+  let insertText = "";
+  let range = {
+    startLineNumber: context.position.lineNumber,
+    startColumn: context.position.column,
+    endLineNumber: context.position.lineNumber,
+    endColumn: context.position.column,
+  };
 
-  if (!topSuggestionText || currentRangeText === topSuggestionText) {
-    clearInlinePreview();
-    return;
+  if (tokenPrefix && suggestionText.toLowerCase().startsWith(tokenPrefix.toLowerCase())) {
+    insertText = suggestionText.slice(tokenPrefix.length);
+  } else if (isRepair && tokenPrefix && !isClauseKeyword(tokenPrefix)) {
+    insertText = suggestionText;
+    const replacementRange = getSuggestionReplacementRange(context, suggestionItem);
+    range = {
+      startLineNumber: replacementRange.startLineNumber,
+      startColumn: replacementRange.startColumn,
+      endLineNumber: replacementRange.endLineNumber,
+      endColumn: replacementRange.endColumn,
+    };
+  } else if (shouldAllowClauseGhostPreview(context.sql, context.cursor, tokenPrefix)) {
+    insertText = buildClauseGhostText(context.sql, context.cursor, suggestionText);
+  } else if (!tokenPrefix && /\s$/.test(context.sql.slice(0, context.cursor))) {
+    insertText = suggestionText;
   }
 
-  inlinePreview = {
-    text: topSuggestionText,
+  if (!insertText) {
+    return null;
+  }
+
+  return {
+    text: insertText,
+    fullText: suggestionText,
     cursor: context.cursor,
     modelVersion: context.model.getVersionId(),
-    range: {
-      startLineNumber: range.startLineNumber,
-      startColumn: range.startColumn,
-      endLineNumber: range.endLineNumber,
-      endColumn: range.endColumn,
-    },
+    range,
   };
+}
+
+function updateInlinePreview(context, items) {
+  if (!context) {
+    clearInlinePreview();
+    return;
+  }
+
+  const preview = buildPreviewFromSuggestions(context, items || []);
+  if (!preview) {
+    clearInlinePreview();
+    return;
+  }
+
+  inlinePreview = preview;
 
   editor.trigger("inline", "editor.action.inlineSuggest.trigger", {});
 }
@@ -598,15 +1142,79 @@ function applySuggestionsForContext(context, normalized, statusMessage = null, s
     return false;
   }
 
+  activeSuggestionStrategy = normalized.strategy || "rule_only";
+  activeSuggestionContext = {
+    sql: activeContext.sql,
+    cursor: activeContext.cursor,
+    modelVersion: activeContext.model.getVersionId(),
+    useLLM: !!activeContext.useLLM,
+  };
   renderSuggestionList(normalized.items, normalized.reasonMap);
-  updateContextLabel(normalized.contextLabel);
-  updateInlinePreview(activeContext, normalized.items[0]?.text || "");
+  updateContextLabel(normalized.contextLabel, normalized.strategyLabel);
+  updateInlinePreview(activeContext, normalized.items);
+  maybeTriggerSuggestWidget(activeContext);
 
   if (statusMessage) {
     setStatus(statusMessage, statusLevel);
   }
 
   return true;
+}
+
+function hasFreshSuggestionCache(context) {
+  return (
+    !!context &&
+    !!activeSuggestionContext &&
+    activeSuggestionContext.sql === context.sql &&
+    activeSuggestionContext.cursor === context.cursor &&
+    activeSuggestionContext.modelVersion === context.model.getVersionId() &&
+    activeSuggestionContext.useLLM === !!context.useLLM &&
+    activeSuggestions.length > 0
+  );
+}
+
+function buildPreviewFromSuggestions(context, items) {
+  if (!context || !items?.length) {
+    return null;
+  }
+
+  const selectedSuggestion = pickGhostSuggestion(context, items);
+  if (!selectedSuggestion?.text) {
+    return null;
+  }
+
+  return buildInlinePreview(context, selectedSuggestion);
+}
+
+function buildCompletionItems(model, context, items) {
+  return {
+    suggestions: (items || []).map((item) => ({
+      label: item.text,
+      kind: monaco.languages.CompletionItemKind.Field,
+      insertText: item.text,
+      range: getSuggestionReplacementRange(context, item),
+      detail: `${item.source.toUpperCase()} | ${formatConfidence(item.confidence)} | ${humanizeReasonCode(
+        item.reasonCode
+      )}`,
+      documentation: item.reason || activeSuggestionReasons[item.text] || "Context aware suggestion",
+    })),
+  };
+}
+
+function maybeTriggerSuggestWidget(context) {
+  if (!editor || !context || !hasFreshSuggestionCache(context)) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    const latestContext = getActiveContext();
+    if (!latestContext || !hasFreshSuggestionCache(latestContext)) {
+      return;
+    }
+
+    editor.trigger("autocomplete", "editor.action.triggerSuggest", {});
+    editor.trigger("inline", "editor.action.inlineSuggest.trigger", {});
+  }, 0);
 }
 
 function getInlineRange() {
@@ -654,6 +1262,37 @@ function acceptInlinePreviewWithTab() {
   return true;
 }
 
+function acceptTopSuggestionWithTab() {
+  if (!editor || !activeSuggestions.length) {
+    return false;
+  }
+
+  const context = getActiveContext();
+  if (!context || !hasFreshSuggestionCache(context)) {
+    return false;
+  }
+
+  const suggestion = pickGhostSuggestion(context, activeSuggestions);
+  if (!suggestion) {
+    return false;
+  }
+
+  const range = getSuggestionReplacementRange(context, suggestion);
+  let text = suggestion.text;
+
+  editor.executeEdits("inline-tab-fallback-accept", [
+    {
+      range,
+      text,
+      forceMoveMarkers: true,
+    },
+  ]);
+
+  clearInlinePreview();
+  scheduleLiveRefresh(70);
+  return true;
+}
+
 function insertSuggestionByIndex(index) {
   if (!editor || index < 0 || index >= activeSuggestions.length) {
     return;
@@ -665,7 +1304,7 @@ function insertSuggestionByIndex(index) {
   }
 
   const suggestion = activeSuggestions[index];
-  const range = getReplacementRange(context.model, context.cursor, context.position, suggestion.text);
+  const range = getSuggestionReplacementRange(context, suggestion);
 
   editor.executeEdits("sidebar-suggestion-insert", [
     {
@@ -694,16 +1333,18 @@ async function hydrateWithLlm(context, seq, label = "Live preview", showStatus =
     const normalized = normalizeSuggestionPayload(payload, "rule");
     const llmCount = normalized.items.filter((item) => item.source === "llm").length;
     const statusMessage =
-      payload.mode === "hybrid"
-        ? `${label}: 规则建议已合并 ${llmCount} 条 LLM 建议 / Rule + LLM merged`
-        : normalized.fallbackReason || `${label}: 当前仅规则补全 / Rule-only suggestions now`;
+      normalized.strategy === "hybrid"
+        ? `${label}: ${normalized.strategyLabel}，已合并 ${llmCount} 条 LLM 建议 / Hybrid suggestions merged`
+        : normalized.fallbackReason ||
+          `${label}: 当前策略 ${normalized.strategyLabel} / Active strategy: ${normalized.strategyLabel}`;
 
     applySuggestionsForContext(
       context,
       normalized,
       showStatus ? statusMessage : null,
-      payload.mode === "hybrid" ? "success" : "info"
+      normalized.strategy === "hybrid" ? "success" : "info"
     );
+    maybeTriggerSuggestWidget(context);
   } catch (_error) {
     if (seq !== requestSeq) {
       return;
@@ -750,7 +1391,8 @@ async function runRuleFirstFlow(
 
     clearInlinePreview();
     renderSuggestionList([]);
-    updateContextLabel("通用补全 / General SQL suggestions");
+    activeSuggestionStrategy = "rule_only";
+    updateContextLabel("通用补全 / General SQL suggestions", "Rule Only");
     if (showStatus) {
       setStatus(
         `补全请求失败：${error.message}`,
@@ -935,6 +1577,9 @@ async function approveChatProposal() {
     const payload = await approveProposal(activeProposal.proposal_id, activeProposal.approval_token);
     renderProposal(payload.proposal, null);
 
+    const successCount = (payload.proposal.execution_results || []).filter(
+      (item) => item.status === "success"
+    ).length;
     const failedCount = (payload.proposal.execution_results || []).filter(
       (item) => item.status === "error"
     ).length;
@@ -947,6 +1592,9 @@ async function approveChatProposal() {
     } else {
       appendChatMessage("assistant", "执行成功 / Execution succeeded.");
       setStatus(payload.message || "执行成功 / Execution succeeded.", "success");
+    }
+
+    if (successCount > 0) {
       scheduleLiveRefresh(30);
       refreshSchemaOverview(false);
     }
@@ -1018,14 +1666,26 @@ require(["vs/editor/editor.main"], () => {
 
   monaco.languages.registerInlineCompletionsProvider("sql", {
     provideInlineCompletions(model, position) {
-      if (!inlinePreview) {
+      const cursor = model.getOffsetAt(position);
+      const context = {
+        model,
+        position,
+        sql: model.getValue(),
+        cursor,
+        useLLM: getUseLlmEnabled(),
+      };
+
+      if (!hasFreshSuggestionCache(context)) {
         return { items: [] };
       }
 
-      const cursor = model.getOffsetAt(position);
-      if (cursor !== inlinePreview.cursor || model.getVersionId() !== inlinePreview.modelVersion) {
+      const preview = buildPreviewFromSuggestions(context, activeSuggestions);
+      if (!preview) {
+        inlinePreview = null;
         return { items: [] };
       }
+
+      inlinePreview = preview;
 
       const range = getInlineRange();
       if (!range) {
@@ -1047,14 +1707,17 @@ require(["vs/editor/editor.main"], () => {
   monaco.languages.registerCompletionItemProvider("sql", {
     triggerCharacters: [".", " ", "\n"],
     provideCompletionItems: async (model, position) => {
-      const useLlmInput = document.getElementById("use-llm");
       const context = {
         model,
         position,
         sql: model.getValue(),
         cursor: model.getOffsetAt(position),
-        useLLM: !!useLlmInput?.checked,
+        useLLM: getUseLlmEnabled(),
       };
+
+      if (hasFreshSuggestionCache(context)) {
+        return buildCompletionItems(model, context, activeSuggestions);
+      }
 
       const seq = ++requestSeq;
 
@@ -1071,18 +1734,12 @@ require(["vs/editor/editor.main"], () => {
           hydrateWithLlm(context, seq, "Auto-complete", false);
         }
 
-        return {
-          suggestions: normalized.items.map((item) => ({
-            label: item.text,
-            kind: monaco.languages.CompletionItemKind.Field,
-            insertText: item.text,
-            range: getReplacementRange(model, context.cursor, position, item.text),
-            detail: `${item.source.toUpperCase()} | ${
-              activeSuggestionReasons[item.text] || "Context aware suggestion"
-            }`,
-          })),
-        };
+        return buildCompletionItems(model, context, normalized.items);
       } catch (error) {
+        if (seq !== requestSeq) {
+          return { suggestions: [] };
+        }
+
         clearInlinePreview();
         setStatus(`自动补全失败：${error.message}`, "error");
         return { suggestions: [] };
@@ -1093,6 +1750,7 @@ require(["vs/editor/editor.main"], () => {
   bindClick("run-complete", manualSuggest);
   bindClick("tab-suggestions", () => switchPanel("suggestions"));
   bindClick("tab-chat", () => switchPanel("chat"));
+  bindClick("schema-refresh", handleSchemaRefresh);
   bindClick("chat-plan", submitChatPlan);
   bindClick("chat-refresh", refreshChatProposal);
   bindClick("proposal-approve", approveChatProposal);
@@ -1142,14 +1800,14 @@ require(["vs/editor/editor.main"], () => {
   });
 
   editor.onKeyDown((event) => {
-    if (event.keyCode === monaco.KeyCode.Tab && acceptInlinePreviewWithTab()) {
+    if (event.keyCode === monaco.KeyCode.Tab && (acceptInlinePreviewWithTab() || acceptTopSuggestionWithTab())) {
       event.preventDefault();
       event.stopPropagation();
     }
   });
 
   window.addEventListener("keydown", (event) => {
-    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+    if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey) {
       return;
     }
 
@@ -1168,10 +1826,11 @@ require(["vs/editor/editor.main"], () => {
   });
 
   setStatus(
-    "已就绪：Ctrl/Cmd + Space 触发补全，Tab 接受幽灵文本，Alt+1..9 快速插入。",
+    "已就绪：Ctrl/Cmd + Space 触发补全，Tab 接受幽灵文本，Option+Shift+1..9 快速插入。",
     "info"
   );
   switchPanel("suggestions");
+  renderSchemaRail();
   renderProposal(null, null);
   appendChatMessage(
     "assistant",

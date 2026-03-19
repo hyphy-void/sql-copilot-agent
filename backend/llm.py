@@ -60,6 +60,13 @@ class OpenAIProvider(BaseLLMProvider):
         schema_lines = [
             f"{table}({', '.join(columns)})" for table, columns in schema_snapshot.items()
         ]
+        repair_mode = "repair" in context.lower()
+        repair_hint = ""
+        if repair_mode:
+            repair_hint = (
+                " The SQL prefix may contain typos, duplicated fragments, or malformed identifiers. "
+                "Prefer corrected continuations that repair the current trailing fragment before continuing."
+            )
 
         messages = [
             {
@@ -67,6 +74,7 @@ class OpenAIProvider(BaseLLMProvider):
                 "content": (
                     "You are a SQL copilot. Return 3 short SQL continuation suggestions. "
                     "Output a JSON array of strings only."
+                    f"{repair_hint}"
                 ),
             },
             {
@@ -74,7 +82,8 @@ class OpenAIProvider(BaseLLMProvider):
                 "content": (
                     f"Context: {context}\n"
                     f"Schema:\n{chr(10).join(schema_lines)}\n\n"
-                    "Complete this SQL prefix with practical suggestions:\n"
+                    "Complete this SQL prefix with practical suggestions. "
+                    "Return continuations that can be inserted directly at the cursor without explanation.\n"
                     f"{sql_prefix}"
                 ),
             },

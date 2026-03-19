@@ -41,27 +41,44 @@ sql-copilot-agent
 │   ├── index.html
 │   └── monaco.js
 ├── .env.example
+├── pyproject.toml
 ├── db
 │   └── init.sql
 ├── tests
 ├── scripts
 │   └── demo.sh
 ├── requirements.txt
+├── sql_env.yml
 └── README.md
 ```
 
 ## Quick Start
 
 ```bash
-conda create -n sql-copilot-agent python=3.11 -y
-conda activate sql-copilot-agent
-pip install -r requirements.txt
+uv python install 3.11
+uv venv --python 3.11
+source .venv/bin/activate
+uv sync --dev
 cp .env.example .env
 # Edit .env with your real key and model
-uvicorn backend.main:app --reload
+uv run uvicorn backend.main:app --reload
 ```
 
 打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。
+
+## Environment Management
+
+推荐使用 `uv` 管理依赖和虚拟环境，项目已经提供 [`pyproject.toml`](./pyproject.toml)。
+
+常用命令：
+
+```bash
+uv sync --dev
+uv run pytest -q
+uv run uvicorn backend.main:app --reload
+```
+
+如果你仍然需要保留 Conda 工作流，仓库里还保留了 [`sql_env.yml`](./sql_env.yml) 作为兼容方案，但新的默认文档与维护方式以 `uv` 为主。
 
 ## .env 配置（阿里百炼示例）
 
@@ -250,7 +267,7 @@ Response:
 ## Run Tests
 
 ```bash
-pytest -q
+uv run pytest -q
 ```
 
 ## Milestone Mapping

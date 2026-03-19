@@ -9,10 +9,10 @@
 - `scripts/`: small utility scripts (for example `scripts/demo.sh` for endpoint smoke tests).
 
 ## Build, Test, and Development Commands
-- `pip install -r requirements.txt`: install runtime and test dependencies.
+- `uv sync --dev`: install runtime and test dependencies into the local `.venv`.
 - `cp .env.example .env`: create local configuration template before running.
-- `uvicorn backend.main:app --reload`: start API and static frontend at `http://127.0.0.1:8000`.
-- `pytest -q`: run all tests in quiet mode.
+- `uv run uvicorn backend.main:app --reload`: start API and static frontend at `http://127.0.0.1:8000`.
+- `uv run pytest -q`: run all tests in quiet mode.
 - `bash scripts/demo.sh`: quick manual check of `/health`, `/schema/tables`, and `/autocomplete`.
 
 ## Coding Style & Naming Conventions
@@ -30,5 +30,5 @@
 ## Commit & Pull Request Guidelines
 - Use Conventional Commit style seen in history, e.g. `feat: ...`, `fix: ...`, `chore: ...`.
 - Keep each commit scoped to one logical change and include related tests.
-- PRs should include: purpose, key implementation notes, test evidence (`pytest -q` output summary), and screenshots/GIFs for UI updates.
+- PRs should include: purpose, key implementation notes, test evidence (`uv run pytest -q` output summary), and screenshots/GIFs for UI updates.
 - Never commit secrets; keep credentials only in local `.env` (already ignored).
